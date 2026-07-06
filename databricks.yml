@@ -43,6 +43,9 @@ variables:
   notification_email:
     description: Address for job-failure alerts
     default: irenejinheechoi@gmail.com
+  owner_user:
+    description: Workspace user granted access to CI-created catalogs and the app
+    default: jchoi867@gatech.edu
 
 targets:
   dev:
@@ -104,7 +107,7 @@ resources:
               catalog: ${var.catalog}
               tickers: ${var.tickers}
               user_agent_email: ${var.user_agent_email}
-              owner_user: ${var.notification_email}
+              owner_user: ${var.owner_user}
 
         # 02 — bronze -> {catalog}.silver.{statements, statements_wide}
         - task_key: build_statements
@@ -164,4 +167,4 @@ resources:
             permission: CAN_QUERY
       permissions:
         - level: CAN_MANAGE
-          user_name: irenejinheechoi@gmail.com
+          user_name: ${var.owner_user}
