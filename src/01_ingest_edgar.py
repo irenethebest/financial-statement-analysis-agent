@@ -17,8 +17,11 @@ dbutils.widgets.text("catalog", "fs_analysis_agent_dev", "Unity Catalog")
 dbutils.widgets.text("tickers", "AAPL,MSFT,NVDA,TSLA", "Tickers (comma-separated)")
 dbutils.widgets.text("user_agent_email", "irenejinheechoi@gmail.com",
                      "Contact email for SEC User-Agent header")
+dbutils.widgets.text("owner_user", "jchoi867@gatech.edu",
+                     "User to grant catalog access (CI runs as a service principal)")
 
 CATALOG = dbutils.widgets.get("catalog")
+OWNER_USER = dbutils.widgets.get("owner_user")
 SCHEMA = "bronze"
 TICKERS = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",") if t.strip()]
 UA_EMAIL = dbutils.widgets.get("user_agent_email")
@@ -44,6 +47,17 @@ for s in ("bronze", "silver", "gold"):
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{s}")
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"USE SCHEMA {SCHEMA}")
+
+# CI deploys run this job as a service principal, which then owns the
+# catalog. Grant the human owner full access so it shows up in Catalog
+# Explorer (no-op if the job runs as that user already).
+if OWNER_USER:
+    try:
+        spark.sql(f"GRANT ALL PRIVILEGES ON CATALOG {CATALOG} "
+                  f"TO `{OWNER_USER}`")
+        print(f"Granted ALL PRIVILEGES on {CATALOG} to {OWNER_USER}")
+    except Exception as exc:
+        print(f"Grant skipped: {exc}")
 
 # COMMAND ----------
 
