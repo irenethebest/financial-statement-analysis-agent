@@ -1,0 +1,53 @@
+name: CI
+
+# Fast, free checks on every push/PR — no Databricks credentials needed.
+# Runs the offline test suite (synthetic XBRL data through extraction,
+# ratios, DuPont, anomaly rules, and agent tool plumbing).
+
+on:
+  push:
+    branches: [dev, test, main]
+  pull_request:
+    branches: [dev, test, main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run offline tests
+        run: python tests/test_local.py
+
+      - name: Check app copy of agent_core is in sync
+        run: |
+          # app/agent_core.py is a deploy-time copy of fsa/agent_core.py
+          # (Databricks Apps ship only the app/ folder). Compare everything
+          # after each file's module docstring header.
+          python - <<'EOF'
+          import ast, sys
+          def body(path):
+              src = open(path).read()
+              tree = ast.parse(src)
+              # drop the docstring, compare the rest structurally
+              if (tree.body and isinstance(tree.body[0], ast.Expr)
+                      and isinstance(tree.body[0].value, ast.Constant)):
+                  tree.body = tree.body[1:]
+              return ast.dump(tree)
+          if body("fsa/agent_core.py") != body("app/agent_core.py"):
+              sys.exit("app/agent_core.py is out of sync with fsa/agent_core.py "
+                       "— run: cp fsa/agent_core.py app/agent_core.py "
+                       "(keep the COPY header)")
+          print("agent_core copies in sync")
+          EOF

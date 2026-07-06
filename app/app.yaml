@@ -1,0 +1,14 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=8000
+  - --server.address=0.0.0.0
+
+# Defaults for local `streamlit run app.py`; the bundle overrides these
+# per environment in databricks.yml.
+env:
+  - name: APP_CATALOG
+    value: fs_analysis_agent_dev
+  - name: LLM_ENDPOINT
+    value: databricks-claude-sonnet-4

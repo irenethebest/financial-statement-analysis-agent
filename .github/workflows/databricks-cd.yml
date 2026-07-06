@@ -1,0 +1,53 @@
+name: Databricks CD
+
+# Continuous deployment for the Asset Bundle. Promotion flow:
+#   - Pull request               -> validate only (a check on the PR)
+#   - Push to `dev`              -> deploy to DEV  (fs_analysis_agent_dev)
+#   - Push to `test`             -> deploy to TEST (fs_analysis_agent_test)
+#   - Push to `main`             -> deploy to PROD (fs_analysis_agent)
+#   - Manual (workflow_dispatch) -> run on demand
+#
+# Repo secrets required (Settings -> Secrets and variables -> Actions):
+#   DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET — the workspace
+#   service principal's OAuth (M2M) credentials (reuse github_ci).
+
+on:
+  push:
+    branches: [dev, test, main]
+  pull_request:
+    branches: [dev, test, main]
+  workflow_dispatch:
+
+concurrency:
+  group: databricks-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: https://dbc-746b43ac-afe7.cloud.databricks.com
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Pick target (main -> prod, test -> test, anything else -> dev)
+        id: t
+        run: echo "target=${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'test' && 'test' || 'dev' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate bundle
+        run: databricks bundle validate -t ${{ steps.t.outputs.target }}
+
+      - name: Deploy bundle
+        if: github.event_name != 'pull_request'
+        run: databricks bundle deploy -t ${{ steps.t.outputs.target }}
+
+      # Deliberately NOT auto-running fsa_pipeline after deploy: it calls
+      # SEC EDGAR and burns serverless compute on every push. The prod
+      # schedule (1st of the month) handles refreshes; run manually with
+      #   databricks bundle run fsa_pipeline -t dev

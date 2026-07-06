@@ -1,0 +1,166 @@
+# Financial Statement Analysis Agent — Databricks Asset Bundle
+# =============================================================
+# SEC EDGAR -> bronze/silver/gold Delta pipeline -> UC tool functions,
+# plus a Streamlit Databricks App that runs the Claude tool-calling agent
+# in-process (Free-Edition-friendly: no dedicated Model Serving endpoint).
+#
+# Environments follow catalog-per-env with fixed medallion schemas:
+#   dev  -> fs_analysis_agent_dev .{bronze,silver,gold}
+#   test -> fs_analysis_agent_test.{bronze,silver,gold}
+#   prod -> fs_analysis_agent     .{bronze,silver,gold}
+#
+# Git flow (see .github/workflows/databricks-cd.yml):
+#   feature work -> push `dev` (deploys dev) -> promote `test` -> merge `main` (prod)
+#
+#   databricks bundle validate
+#   databricks bundle deploy -t dev
+#   databricks bundle run fsa_pipeline -t dev
+#
+# Free Edition is serverless-only — tasks use serverless jobs compute.
+
+bundle:
+  name: financial_statement_analysis_agent
+
+variables:
+  env:
+    description: Environment name (dev / test / prod), overridden per target
+    default: dev
+  catalog:
+    description: Unity Catalog for this environment (schemas are fixed bronze/silver/gold)
+    default: fs_analysis_agent_dev
+  tickers:
+    description: Companies to ingest (comma-separated)
+    default: "AAPL,MSFT,NVDA,TSLA"
+  user_agent_email:
+    description: Contact email for the SEC EDGAR User-Agent header
+    default: irenejinheechoi@gmail.com
+  warehouse_id:
+    description: SQL warehouse the app queries and runs UC tools on
+    default: "0f9084bee8c224a2"
+  llm_endpoint:
+    description: Pay-per-token Foundation Model endpoint for the agent
+    default: databricks-claude-sonnet-4
+  notification_email:
+    description: Address for job-failure alerts
+    default: irenejinheechoi@gmail.com
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-746b43ac-afe7.cloud.databricks.com
+    variables:
+      env: dev
+      catalog: fs_analysis_agent_dev
+
+  test:
+    workspace:
+      host: https://dbc-746b43ac-afe7.cloud.databricks.com
+    variables:
+      env: test
+      catalog: fs_analysis_agent_test
+
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-746b43ac-afe7.cloud.databricks.com
+      # The CI service principal (github_ci) deploys prod — same pattern as
+      # accounting_analytics. Using its path keeps CI and manual deploys on
+      # one deployment. Update the UUID if you use a different SP.
+      root_path: /Workspace/Users/4133b960-e677-44e9-a648-478029605f7d/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      env: prod
+      catalog: fs_analysis_agent
+    resources:
+      jobs:
+        fsa_pipeline:
+          schedule:
+            pause_status: UNPAUSED
+
+resources:
+  jobs:
+    fsa_pipeline:
+      name: fsa-pipeline
+      tags:
+        project: financial_statement_analysis_agent
+
+      # Monthly refresh: 1st of each month 06:00 ET. PAUSED except in prod.
+      schedule:
+        quartz_cron_expression: "0 0 6 1 * ?"
+        timezone_id: America/New_York
+        pause_status: PAUSED
+
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+
+      tasks:
+        # 01 — EDGAR -> {catalog}.bronze.{companies, xbrl_facts, filings}
+        - task_key: ingest_edgar
+          notebook_task:
+            notebook_path: ./src/01_ingest_edgar.py
+            base_parameters:
+              catalog: ${var.catalog}
+              tickers: ${var.tickers}
+              user_agent_email: ${var.user_agent_email}
+
+        # 02 — bronze -> {catalog}.silver.{statements, statements_wide}
+        - task_key: build_statements
+          depends_on: [{task_key: ingest_edgar}]
+          notebook_task:
+            notebook_path: ./src/02_build_statements.py
+            base_parameters:
+              catalog: ${var.catalog}
+              form: "10-K"
+              periods: "6"
+
+        # 03 — silver -> {catalog}.gold.{ratios, anomalies}
+        - task_key: ratios_anomalies
+          depends_on: [{task_key: build_statements}]
+          notebook_task:
+            notebook_path: ./src/03_ratios_anomalies.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+        # 04 — agent tool functions in {catalog}.gold
+        - task_key: register_tools
+          depends_on: [{task_key: ratios_anomalies}]
+          notebook_task:
+            notebook_path: ./src/04_register_tools.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+  apps:
+    fsa_app:
+      name: fsa-agent-${var.env}
+      description: SEC filing analysis — Claude agent over UC-governed tools
+      source_code_path: ./app
+      config:
+        command:
+          - streamlit
+          - run
+          - app.py
+          - --server.port=8000
+          - --server.address=0.0.0.0
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: APP_CATALOG
+            value: ${var.catalog}
+          - name: LLM_ENDPOINT
+            value: ${var.llm_endpoint}
+      resources:
+        - name: sql_warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        # Lets the app's service principal call the pay-per-token Claude
+        # endpoint without extra grants.
+        - name: llm
+          serving_endpoint:
+            name: ${var.llm_endpoint}
+            permission: CAN_QUERY
+      permissions:
+        - level: CAN_MANAGE
+          user_name: irenejinheechoi@gmail.com

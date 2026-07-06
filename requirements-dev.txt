@@ -1,0 +1,5 @@
+# Local development / CI — the offline test suite and the fsa library.
+# (Databricks notebooks and the app manage their own dependencies.)
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
