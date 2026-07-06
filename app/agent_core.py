@@ -154,11 +154,13 @@ def run_agent(
     messages.append({"role": "user", "content": user_message})
 
     for _turn in range(max_turns):
+        notify(f"Thinking (step {_turn + 1}/{max_turns})…")
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOL_SPECS,
             max_tokens=4000,
+            timeout=120,  # never hang silently on a single LLM call
         )
         msg = resp.choices[0].message
 
