@@ -11,4 +11,4 @@ env:
   - name: APP_CATALOG
     value: fs_analysis_agent_dev
   - name: LLM_ENDPOINT
-    value: databricks-claude-sonnet-4
+    value: databricks-claude-sonnet-5

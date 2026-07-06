@@ -20,7 +20,7 @@ GOLD    gold.ratios · gold.anomalies
         │  04_register_tools        4 UC SQL functions in gold = the agent's tools
         ▼
 AGENT   fsa/agent_core.py           OpenAI-protocol tool-calling loop against
-        │                           databricks-claude-sonnet-4 (pay-per-token
+        │                           databricks-claude-sonnet-5 (pay-per-token
         ▼                           Foundation Model API), MLflow-traced
 APP     app/                        Streamlit Databricks App: chat + dashboard
 ```

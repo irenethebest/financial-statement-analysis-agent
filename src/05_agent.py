@@ -3,7 +3,7 @@
 # MAGIC # 05 · The Agent — Claude + UC Tools, Traced with MLflow
 # MAGIC
 # MAGIC Runs the tool-calling agent (`fsa/agent_core.py`) against Databricks'
-# MAGIC pay-per-token **Foundation Model API** (`databricks-claude-sonnet-4`),
+# MAGIC pay-per-token **Foundation Model API** (`databricks-claude-sonnet-5`),
 # MAGIC executing the Unity Catalog tool functions from notebook 04.
 # MAGIC
 # MAGIC **MLflow 3 tracing** captures every LLM call and tool execution, so a
@@ -22,7 +22,7 @@
 # COMMAND ----------
 
 dbutils.widgets.text("catalog", "fs_analysis_agent_dev", "Unity Catalog")
-dbutils.widgets.text("llm_endpoint", "databricks-claude-sonnet-4",
+dbutils.widgets.text("llm_endpoint", "databricks-claude-sonnet-5",
                      "Foundation Model endpoint")
 dbutils.widgets.text("question",
                      "Analyze AAPL's most recent fiscal years.",
@@ -107,7 +107,7 @@ print(answer)
 # MAGIC     name="fsa_agent",
 # MAGIC     python_model="agent_as_code.py",      # ChatAgent wrapping run_agent()
 # MAGIC     resources=[                            # auto-auth for the endpoint+tools
-# MAGIC         DatabricksServingEndpoint(endpoint_name="databricks-claude-sonnet-4"),
+# MAGIC         DatabricksServingEndpoint(endpoint_name="databricks-claude-sonnet-5"),
 # MAGIC         DatabricksFunction(function_name=f"{FQ}.get_ratios"),
 # MAGIC         DatabricksFunction(function_name=f"{FQ}.get_anomalies"),
 # MAGIC         DatabricksFunction(function_name=f"{FQ}.get_statements"),

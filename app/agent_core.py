@@ -8,7 +8,7 @@ which tool to call and narrates the JSON that comes back.
 
 The loop speaks the OpenAI chat-completions protocol, which Databricks
 Foundation Model APIs expose natively — so the same code runs against
-`databricks-claude-sonnet-4` in a notebook, in the app, or (if deployed)
+`databricks-claude-sonnet-5` in a notebook, in the app, or (if deployed)
 behind a Model Serving endpoint.
 """
 
