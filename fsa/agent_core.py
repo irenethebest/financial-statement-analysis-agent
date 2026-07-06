@@ -5,9 +5,9 @@ deterministic pipeline code and Unity Catalog functions; Claude decides
 which tool to call and narrates the JSON that comes back.
 
 The loop speaks the OpenAI chat-completions protocol, which Databricks
-Foundation Model APIs expose natively — so the same code runs against
-`databricks-claude-sonnet-5` in a notebook, in the app, or (if deployed)
-behind a Model Serving endpoint.
+Foundation Model APIs expose natively — so it is model-agnostic: Llama 4
+Maverick on Free Edition (Claude/GPT are trust-tier gated there), Claude
+on paid workspaces. One config variable, no code change.
 """
 
 from __future__ import annotations

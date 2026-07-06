@@ -38,8 +38,11 @@ variables:
     description: SQL warehouse the app queries and runs UC tools on
     default: "0f9084bee8c224a2"
   llm_endpoint:
+    # Free Edition gates premium models (Claude/GPT) to a rate limit of 0;
+    # open models are not gated. On a paid workspace, switch to
+    # databricks-claude-sonnet-5 — same agent loop, no code change.
     description: Pay-per-token Foundation Model endpoint for the agent
-    default: databricks-claude-sonnet-5
+    default: databricks-llama-4-maverick
   notification_email:
     description: Address for job-failure alerts
     default: irenejinheechoi@gmail.com

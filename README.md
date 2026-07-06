@@ -20,8 +20,8 @@ GOLD    gold.ratios · gold.anomalies
         │  04_register_tools        4 UC SQL functions in gold = the agent's tools
         ▼
 AGENT   fsa/agent_core.py           OpenAI-protocol tool-calling loop against
-        │                           databricks-claude-sonnet-5 (pay-per-token
-        ▼                           Foundation Model API), MLflow-traced
+        │                           a pay-per-token Foundation Model API
+        ▼                           endpoint (model-agnostic), MLflow-traced
 APP     app/                        Streamlit Databricks App: chat + dashboard
 ```
 
@@ -42,6 +42,8 @@ Workflow: build on a feature branch (or locally) → push to `dev` (CI tests + a
 ## Why the agent runs inside the app
 
 On Free Edition (and as cost discipline anywhere), an always-on Model Serving endpoint is the resource to avoid. The tool-calling loop is plain Python speaking the OpenAI protocol, so the Streamlit app executes it in-process: UC tool functions run on the bound SQL warehouse, the LLM is the shared pay-per-token endpoint. `src/05_agent.py` documents the production path (`mlflow.pyfunc.log_model` + `agents.deploy`) for a paid workspace — same loop, different serving skin.
+
+The agent is also **model-agnostic by design**: Free Edition workspaces sit in a trust tier that rate-limits premium hosted models (Claude, GPT) to zero, so the default endpoint is `databricks-llama-4-maverick`; on a paid workspace, setting the `llm_endpoint` bundle variable to `databricks-claude-sonnet-5` swaps the model with no code change.
 
 ## Red-flag rules (`fsa/anomalies.py`)
 

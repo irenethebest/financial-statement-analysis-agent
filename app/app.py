@@ -10,7 +10,9 @@ Env (set by databricks.yml):
   DATABRICKS_WAREHOUSE_ID   bound SQL warehouse
   APP_CATALOG               environment catalog (fs_analysis_agent[_dev|_test]);
                             schemas are fixed: bronze / silver / gold
-  LLM_ENDPOINT              FMAPI endpoint (default databricks-claude-sonnet-5)
+  LLM_ENDPOINT              FMAPI endpoint (default databricks-llama-4-maverick;
+                            Free Edition gates Claude/GPT endpoints to rate
+                            limit 0 — use open models there)
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ except ImportError:
 CATALOG = os.getenv("APP_CATALOG", "fs_analysis_agent_dev")
 FQ = f"{CATALOG}.gold"  # tool functions live in the gold (serving) schema
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
-LLM = os.getenv("LLM_ENDPOINT", "databricks-claude-sonnet-5")
+LLM = os.getenv("LLM_ENDPOINT", "databricks-llama-4-maverick")
 
 st.set_page_config(page_title="Financial Statement Analysis Agent",
                    page_icon="📄", layout="wide")
