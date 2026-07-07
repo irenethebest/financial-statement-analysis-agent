@@ -41,6 +41,16 @@ LINE_ITEMS: dict[str, dict] = {
         "statement": "IS", "kind": "duration",
         "tags": ["OperatingIncomeLoss"],
     },
+    "rd_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["ResearchAndDevelopmentExpense",
+                 "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
+    },
+    "sga_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["SellingGeneralAndAdministrativeExpense",
+                 "GeneralAndAdministrativeExpense"],
+    },
     "interest_expense": {
         "statement": "IS", "kind": "duration",
         "tags": ["InterestExpense", "InterestExpenseNonoperating",

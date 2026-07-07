@@ -146,6 +146,31 @@ def main() -> None:
     ok(all(len(c) <= 2800 for c in chunks) and len(chunks) > 1,
        "chunking produces bounded pieces")
 
+    print("7. Segment revenue from inline XBRL")
+    from fsa import segments as seg_mod
+    ctx = """
+    <xbrli:context id="c-prod"><xbrli:entity/><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ProductMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2024-10-01</xbrli:startDate><xbrli:endDate>2025-09-27</xbrli:endDate></xbrli:period></xbrli:context>
+    <xbrli:context id="c-svc"><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ServiceMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2024-10-01</xbrli:startDate><xbrli:endDate>2025-09-27</xbrli:endDate></xbrli:period></xbrli:context>
+    <xbrli:context id="c-old"><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ProductMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2023-10-02</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period></xbrli:context>
+    """
+    facts = """
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-prod" scale="6" decimals="-6">294,866</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-svc" scale="6" decimals="-6">96,169</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-old" scale="6" decimals="-6">280,000</ix:nonFraction>
+    """
+    segs = seg_mod.parse_segment_revenue(f"<html>{ctx}{facts}</html>")
+    ok(len(segs) == 2, "two segments for the latest year (old year dropped)")
+    ok(segs[0]["label"] == "Product" and segs[0]["value"] == 294_866e6,
+       "member label + scaled value")
+    ok(seg_mod.parse_segment_revenue("<html>no xbrl here</html>") == [],
+       "graceful empty result")
+
     print(f"\nAll {checks} checks passed.")
 
 

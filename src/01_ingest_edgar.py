@@ -47,7 +47,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.getcwd(), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from fsa import edgar, mdna  # noqa: E402
+from fsa import edgar, mdna, segments  # noqa: E402
 
 # COMMAND ----------
 
@@ -140,6 +140,7 @@ for ticker in TICKERS:
 # COMMAND ----------
 
 mdna_rows = []
+segment_rows = []
 by_ticker: dict = {}
 for f in filing_rows:
     if f["form"] == "10-K":
@@ -147,12 +148,21 @@ for f in filing_rows:
 
 for ticker, fils in by_ticker.items():
     fils = sorted(fils, key=lambda f: f["filing_date"], reverse=True)
-    for f in fils[:MDNA_FILINGS]:
+    for idx, f in enumerate(fils[:MDNA_FILINGS]):
         try:
             html = edgar.fetch_filing_document(
                 f["cik"], f["accession_number"], f["primary_document"],
                 UA_EMAIL)
             text = mdna.extract_mdna(mdna.html_to_text(html), form="10-K")
+            if idx == 0:  # segment revenue from the latest 10-K only
+                segs = segments.parse_segment_revenue(html)
+                for s in segs:
+                    segment_rows.append({"ticker": ticker, **s,
+                                         "accession_number":
+                                             f["accession_number"]})
+                print(f"  Segments {ticker}: "
+                      f"{[(s['label'], round(s['value']/1e9, 1)) for s in segs]}"
+                      if segs else f"  Segments {ticker}: none parsed")
         except Exception as exc:
             print(f"  MD&A fetch failed for {ticker} "
                   f"{f['accession_number']}: {exc}")
@@ -205,8 +215,20 @@ else:  # stable empty schema so downstream never breaks
             mdna_text STRING, char_count BIGINT, extraction_ok BOOLEAN)
     """)
 
+if segment_rows:
+    spark.createDataFrame(pd.DataFrame(segment_rows)) \
+        .write.mode("overwrite").option("overwriteSchema", "true") \
+        .saveAsTable("segment_revenue")
+else:
+    spark.sql("""
+        CREATE TABLE IF NOT EXISTS segment_revenue (
+            ticker STRING, axis STRING, member STRING, label STRING,
+            value DOUBLE, `start` STRING, `end` STRING,
+            accession_number STRING)
+    """)
+
 print("Bronze tables written:")
-for t in ("companies", "xbrl_facts", "filings", "mdna"):
+for t in ("companies", "xbrl_facts", "filings", "mdna", "segment_revenue"):
     print(f"  {CATALOG}.{SCHEMA}.{t}: {spark.table(t).count():,} rows")
 if failed:
     print(f"Skipped tickers (not found / fetch error): {failed}")

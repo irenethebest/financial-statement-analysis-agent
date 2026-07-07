@@ -16,11 +16,13 @@
 
 dbutils.widgets.text("catalog", "fs_analysis_agent_dev", "Unity Catalog")
 dbutils.widgets.text("form", "10-K", "Filing form (10-K annual / 10-Q quarterly)")
-dbutils.widgets.text("periods", "6", "Number of periods to keep")
+dbutils.widgets.text("periods", "5", "Annual periods to keep (fiscal years)")
+dbutils.widgets.text("q_periods", "8", "Quarterly periods to keep (10-Q)")
 
 CATALOG = dbutils.widgets.get("catalog")
 FORM = dbutils.widgets.get("form")
 PERIODS = int(dbutils.widgets.get("periods"))
+Q_PERIODS = int(dbutils.widgets.get("q_periods"))
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql("USE SCHEMA silver")
@@ -66,6 +68,27 @@ spark.createDataFrame(wide) \
 
 print(f"Wrote {CATALOG}.silver.statements ({len(tidy):,}) and "
       f"statements_wide ({len(wide):,})")
+
+# COMMAND ----------
+
+# MAGIC %md ### Quarterly (10-Q) statements — discrete quarters only
+# MAGIC The extractor filters to ~90-day durations, so cumulative
+# MAGIC year-to-date figures reported in 10-Qs are excluded.
+
+# COMMAND ----------
+
+tidy_q = statements.build_statements(facts, form="10-Q", periods=Q_PERIODS)
+wide_q = statements.to_wide(tidy_q)
+print(f"Quarterly: {len(tidy_q):,} tidy rows -> {len(wide_q):,} "
+      "company-quarters")
+
+spark.createDataFrame(tidy_q) \
+    .write.mode("overwrite").option("overwriteSchema", "true") \
+    .saveAsTable("statements_q")
+spark.createDataFrame(wide_q) \
+    .write.mode("overwrite").option("overwriteSchema", "true") \
+    .saveAsTable("statements_wide_q")
+print(f"Wrote {CATALOG}.silver.statements_q and statements_wide_q")
 
 # COMMAND ----------
 

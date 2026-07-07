@@ -206,7 +206,16 @@ def load_overview():
         f"SELECT * FROM {CATALOG}.gold.anomalies ORDER BY ticker, period_end")
     wide = query(f"SELECT * FROM {CATALOG}.silver.statements_wide "
                  "ORDER BY ticker, period_end")
-    return companies, ratios, anomalies, wide
+    try:
+        wide_q = query(f"SELECT * FROM {CATALOG}.silver.statements_wide_q "
+                       "ORDER BY ticker, period_end")
+    except Exception:
+        wide_q = pd.DataFrame()
+    try:
+        segs = query(f"SELECT * FROM {CATALOG}.bronze.segment_revenue")
+    except Exception:
+        segs = pd.DataFrame()
+    return companies, ratios, anomalies, wide, wide_q, segs
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +296,20 @@ def _fy(period_end: str) -> str:
     return f"FY{str(period_end)[:4]}"
 
 
-def build_income_flow(row) -> "go.Figure | None":
-    """Sankey of the latest income statement. Returns None when flows are
-    non-positive/missing (loss-makers) — caller falls back to a waterfall."""
+_GREEN = "rgba(26,156,107,.45)"
+_GREEN2 = "rgba(26,156,107,.6)"
+_RED = "rgba(210,72,63,.35)"
+_ORANGE = "rgba(224,136,58,.35)"
+_BLUE = "rgba(47,128,237,.35)"
+_PURPLE = "rgba(91,58,160,.35)"
+
+
+def build_income_flow(row, segments=None) -> "go.Figure | None":
+    """Sankey of the latest income statement, laid out in explicit columns
+    so sibling nodes stack to their parent (Revenue = GP + COGS visually).
+    Labels carry $ and % of revenue. Optional left column: revenue by
+    segment (from inline-XBRL parsing). Returns None for non-positive
+    flows (loss-makers) — caller falls back to a waterfall."""
     import plotly.graph_objects as go
 
     rev, cogs = row.get("revenue"), row.get("cost_of_revenue")
@@ -297,57 +317,104 @@ def build_income_flow(row) -> "go.Figure | None":
     ni = row.get("net_income")
     tax = row.get("income_tax_expense")
     pti = row.get("pretax_income")
+    rd, sga = row.get("rd_expense"), row.get("sga_expense")
 
     core = [rev, cogs, gp, oi, ni]
     if any(v is None or pd.isna(v) or v <= 0 for v in core):
         return None
 
-    labels, links = [], []  # links: (src, dst, value, color)
+    # nodes: (label, $value, column). links: (src, dst, value, color)
+    nodes: list[tuple[str, float, int]] = []
+    links: list[tuple[int, int, float, str]] = []
+    has_segments = bool(segments)
+    col_offset = 1 if has_segments else 0
 
-    def node(name, value=None):
-        text = f"{name}<br>{_b(value)}" if value is not None else name
-        labels.append(text)
-        return len(labels) - 1
+    def node(name, value, col):
+        nodes.append((f"{name}<br>{_b(value)} · {value / rev:.0%}",
+                      value, col + col_offset))
+        return len(nodes) - 1
 
-    n_rev = node("Revenue", rev)
-    n_gp = node("Gross profit", gp)
-    n_cogs = node("Cost of revenue", cogs)
-    n_oi = node("Operating income", oi)
-    n_opex = node("Operating expenses", gp - oi)
-    links += [(n_rev, n_gp, gp, "rgba(26,156,107,.45)"),
-              (n_rev, n_cogs, cogs, "rgba(210,72,63,.35)"),
-              (n_gp, n_oi, oi, "rgba(26,156,107,.45)"),
-              (n_gp, n_opex, max(gp - oi, 0), "rgba(224,136,58,.35)")]
+    n_rev = node("Revenue", rev, 0)
+
+    # Segment column (feeds Revenue). Residual keeps the sum honest.
+    if has_segments:
+        seg_sum = sum(s["value"] for s in segments)
+        shown = [(s["label"], s["value"]) for s in segments]
+        if seg_sum < rev * 0.98:
+            shown.append(("Other", rev - seg_sum))
+        elif seg_sum > rev * 1.05:  # parsed something inconsistent — drop
+            shown = []
+        for name, v in shown:
+            idx = len(nodes)
+            nodes.append((f"{name}<br>{_b(v)} · {v / rev:.0%}", v, 0))
+            links.append((idx, n_rev, max(v, 1e-9), _BLUE))
+
+    n_gp = node("Gross profit", gp, 1)
+    n_cogs = node("Cost of revenue", cogs, 1)
+    n_oi = node("Operating income", oi, 2)
+    opex = gp - oi
+    n_opex = node("Operating expenses", opex, 2)
+    links += [(n_rev, n_gp, gp, _GREEN),
+              (n_rev, n_cogs, cogs, _RED),
+              (n_gp, n_oi, oi, _GREEN),
+              (n_gp, n_opex, max(opex, 1e-9), _ORANGE)]
+
+    # Opex breakdown (only pieces that exist and fit inside opex).
+    known = 0.0
+    for name, v in (("R&D", rd), ("SG&A", sga)):
+        if pd.notna(v) and v > 0 and known + v <= opex * 1.02:
+            idx = node(name, v, 3)
+            links.append((n_opex, idx, v, _ORANGE))
+            known += v
+    if known > 0 and opex - known > opex * 0.02:
+        idx = node("Other opex", opex - known, 3)
+        links.append((n_opex, idx, opex - known, _ORANGE))
+    tail_col = 3 if known > 0 else 2  # where the pretax chain starts
 
     if pd.notna(pti) and pd.notna(tax) and pti > 0 and ni > 0 and tax >= 0:
-        n_pti = node("Pre-tax income", pti)
-        n_ni = node("Net income", ni)
-        n_tax = node("Income tax", tax)
-        if pti >= oi:  # non-operating income added
-            n_oth = node("Non-operating income", pti - oi)
-            links += [(n_oi, n_pti, oi, "rgba(26,156,107,.45)"),
-                      (n_oth, n_pti, max(pti - oi, 1e-9),
-                       "rgba(47,128,237,.35)")]
-        else:  # non-operating costs (interest etc.)
-            n_oth = node("Non-operating costs", oi - pti)
-            links += [(n_oi, n_pti, pti, "rgba(26,156,107,.45)"),
-                      (n_oi, n_oth, oi - pti, "rgba(224,136,58,.35)")]
-        links += [(n_pti, n_ni, ni, "rgba(26,156,107,.6)"),
-                  (n_pti, n_tax, max(tax, 1e-9), "rgba(91,58,160,.35)")]
+        n_pti = node("Pre-tax income", pti, tail_col + 1)
+        if pti >= oi:
+            n_oth = node("Non-operating income", pti - oi, tail_col)
+            links += [(n_oi, n_pti, oi, _GREEN),
+                      (n_oth, n_pti, max(pti - oi, 1e-9), _BLUE)]
+        else:
+            n_oth = node("Non-operating costs", oi - pti, tail_col + 1)
+            links += [(n_oi, n_pti, pti, _GREEN),
+                      (n_oi, n_oth, oi - pti, _ORANGE)]
+        n_ni = node("Net income", ni, tail_col + 2)
+        n_tax = node("Income tax", tax, tail_col + 2)
+        links += [(n_pti, n_ni, ni, _GREEN2),
+                  (n_pti, n_tax, max(tax, 1e-9), _PURPLE)]
     else:
-        n_ni = node("Net income", ni)
-        links.append((n_oi, n_ni, min(ni, oi), "rgba(26,156,107,.6)"))
+        n_ni = node("Net income", ni, tail_col + 1)
+        links.append((n_oi, n_ni, min(ni, oi), _GREEN2))
+
+    # ---- Explicit layout: evenly spaced columns; within a column, nodes
+    # stack top-down proportionally to value so children align to parents.
+    n_cols = max(c for _, _, c in nodes) + 1
+    xs, ys = [], []
+    col_totals = {}
+    for _, v, c in nodes:
+        col_totals[c] = col_totals.get(c, 0) + v
+    col_cum: dict[int, float] = {}
+    for _, v, c in nodes:
+        total = max(col_totals[c], 1e-9)
+        cum = col_cum.get(c, 0.0)
+        ys.append(0.05 + 0.88 * (cum + v / 2) / max(total, rev))
+        col_cum[c] = cum + v
+        xs.append(0.02 + 0.96 * c / max(n_cols - 1, 1))
 
     fig = go.Figure(go.Sankey(
-        node=dict(label=labels, pad=18, thickness=16,
-                  color=NAVY, line=dict(width=0)),
+        arrangement="snap",
+        node=dict(label=[n[0] for n in nodes], x=xs, y=ys,
+                  pad=22, thickness=16, color=NAVY, line=dict(width=0)),
         link=dict(source=[l[0] for l in links],
                   target=[l[1] for l in links],
                   value=[max(l[2], 1e-9) for l in links],
                   color=[l[3] for l in links]),
     ))
-    fig.update_layout(height=420, margin=dict(t=20, b=20, l=10, r=10),
-                      font_size=13)
+    fig.update_layout(height=460, margin=dict(t=20, b=20, l=10, r=10),
+                      font_size=12)
     return fig
 
 
@@ -383,7 +450,7 @@ def build_income_waterfall(row) -> "go.Figure":
 
 with tab_data:
     try:
-        companies, ratios, anomalies, wides = load_overview()
+        companies, ratios, anomalies, wides, wides_q, seg_df = load_overview()
     except Exception as exc:
         st.error(f"Could not load tables from {FQ}: {exc}")
         st.stop()
@@ -393,6 +460,12 @@ with tab_data:
     r = ratios[ratios["ticker"] == sel].sort_values("period_end").copy()
     a = anomalies[anomalies["ticker"] == sel].copy()
     w = wides[wides["ticker"] == sel].sort_values("period_end").copy()
+    wq = (wides_q[wides_q["ticker"] == sel].sort_values("period_end").copy()
+          if not wides_q.empty else pd.DataFrame())
+    sel_segments = (
+        [{"label": row["label"], "value": row["value"]}
+         for _, row in seg_df[seg_df["ticker"] == sel].iterrows()]
+        if not seg_df.empty else [])
     r["fy"] = r["period_end"].map(_fy)
     w["fy"] = w["period_end"].map(_fy)
 
@@ -424,18 +497,22 @@ with tab_data:
                   delta=None, help="Rule-based flags fired for the most "
                                    "recent fiscal year")
 
-    sub_flow, sub_trend, sub_flags, sub_raw = st.tabs(
-        ["🌊 Income statement flow", "📈 5-year trends", "🚩 Red flags",
-         "🗂 Raw data"])
+    sub_stmt, sub_flags, sub_raw = st.tabs(
+        ["📊 Income statement & trends", "🚩 Red flags", "🗂 Raw data"])
+    sub_flow = sub_trend = sub_stmt  # merged page, two sections
 
     # ---- Sankey / waterfall ----
     with sub_flow:
         if wlast is None:
             st.info("No statement data.")
         else:
+            st.subheader("Income statement flow")
             st.caption(f"{sel} — {_fy(wlast['period_end'])} "
-                       f"(fiscal year ended {wlast['period_end']})")
-            fig = build_income_flow(wlast)
+                       f"(fiscal year ended {wlast['period_end']}); "
+                       "labels show $ and % of revenue"
+                       + (" · left column = revenue by source (parsed from "
+                          "the 10-K's inline XBRL)" if sel_segments else ""))
+            fig = build_income_flow(wlast, sel_segments)
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -444,6 +521,56 @@ with tab_data:
                         "instead (negatives welcome).")
                 st.plotly_chart(build_income_waterfall(wlast),
                                 use_container_width=True)
+
+            # ---- Common-size / growth analysis ----
+            st.subheader("Income statement analysis")
+            _IS_ROWS = [
+                ("revenue", "Revenue"),
+                ("cost_of_revenue", "Cost of revenue"),
+                ("gross_profit", "Gross profit"),
+                ("rd_expense", "R&D expense"),
+                ("sga_expense", "SG&A expense"),
+                ("operating_income", "Operating income"),
+                ("pretax_income", "Pre-tax income"),
+                ("income_tax_expense", "Income tax"),
+                ("net_income", "Net income"),
+            ]
+            wprev = w.iloc[-2] if len(w) > 1 else None
+            qlast = wq.iloc[-1] if len(wq) > 0 else None
+            qprev = wq.iloc[-2] if len(wq) > 1 else None
+
+            def _pct(cur, pre):
+                if (cur is None or pre is None or pd.isna(cur)
+                        or pd.isna(pre) or pre == 0):
+                    return "—"
+                return f"{(cur - pre) / abs(pre):+.1%}"
+
+            table = []
+            for col, name in _IS_ROWS:
+                v = wlast.get(col)
+                if v is None or pd.isna(v):
+                    continue
+                table.append({
+                    "Line item": name,
+                    f"{_fy(wlast['period_end'])} ($)": _b(v),
+                    "% of revenue": (f"{v / wlast['revenue']:.1%}"
+                                     if pd.notna(wlast.get("revenue"))
+                                     and wlast["revenue"] else "—"),
+                    "YoY %": _pct(v, wprev.get(col)
+                                  if wprev is not None else None),
+                    "QoQ %": _pct(qlast.get(col)
+                                  if qlast is not None else None,
+                                  qprev.get(col)
+                                  if qprev is not None else None),
+                })
+            st.dataframe(pd.DataFrame(table), use_container_width=True,
+                         hide_index=True)
+            if qlast is not None:
+                st.caption(f"QoQ compares the two most recent discrete "
+                           f"quarters ({qprev['period_end'] if qprev is not None else '—'} "
+                           f"→ {qlast['period_end']}) from 10-Q filings.")
+            st.divider()
+            st.subheader("5-year trends")
 
     # ---- Trends ----
     with sub_trend:
