@@ -55,7 +55,10 @@ if OWNER_USER:
     try:
         spark.sql(f"GRANT ALL PRIVILEGES ON CATALOG {CATALOG} "
                   f"TO `{OWNER_USER}`")
-        print(f"Granted ALL PRIVILEGES on {CATALOG} to {OWNER_USER}")
+        # ALL PRIVILEGES deliberately excludes MANAGE; grant it too so the
+        # owner can hand out access (e.g. to the app's service principal).
+        spark.sql(f"GRANT MANAGE ON CATALOG {CATALOG} TO `{OWNER_USER}`")
+        print(f"Granted ALL PRIVILEGES + MANAGE on {CATALOG} to {OWNER_USER}")
     except Exception as exc:
         print(f"Grant skipped: {exc}")
 
