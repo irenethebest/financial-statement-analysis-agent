@@ -223,7 +223,13 @@ spark.createDataFrame(pd.DataFrame(filing_rows)) \
     .write.mode("overwrite").option("overwriteSchema", "true") \
     .saveAsTable("filings")
 
-spark.createDataFrame(pd.DataFrame(profile_rows)) \
+# astype("string"): all-None columns (e.g. website) otherwise break
+# Spark's type inference and fail the write.
+profile_pdf = pd.DataFrame(profile_rows)
+for c in profile_pdf.columns:
+    if c != "cik":
+        profile_pdf[c] = profile_pdf[c].astype("string")
+spark.createDataFrame(profile_pdf) \
     .write.mode("overwrite").option("overwriteSchema", "true") \
     .saveAsTable("company_profile")
 

@@ -357,12 +357,14 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
     has_segments = bool(segments)
     col_offset = 1 if has_segments else 0
 
-    def node(name, value, col):
-        nodes.append((f"{name}<br>{_b(value)} · {value / rev:.0%}",
-                      value, col + col_offset))
+    def node(name, value, col, rank=9):
+        # rank = top-down order within a column; the profit path is rank 0
+        # so it hugs the top of every column and ribbons run straight.
+        nodes.append([f"{name}<br>{_b(value)} · {value / rev:.0%}",
+                      value, col + col_offset, rank])
         return len(nodes) - 1
 
-    n_rev = node("Revenue", rev, 0)
+    n_rev = node("Revenue", rev, 0, 0)
 
     # Segment column (feeds Revenue). Residual keeps the sum honest.
     if has_segments:
@@ -372,50 +374,54 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
             shown.append(("Other", rev - seg_sum))
         elif seg_sum > rev * 1.05:  # parsed something inconsistent — drop
             shown = []
-        for name, v in shown:
+        for rank_i, (name, v) in enumerate(shown):
             idx = len(nodes)
-            nodes.append((f"{name}<br>{_b(v)} · {v / rev:.0%}", v, 0))
+            nodes.append([f"{name}<br>{_b(v)} · {v / rev:.0%}", v, 0,
+                          rank_i])
             links.append((idx, n_rev, max(v, 1e-9), _BLUE))
 
     if standard:
-        n_gp = node("Gross profit", gp, 1)
-        n_cogs = node("Cost of revenue", cogs, 1)
-        n_oi = node("Operating income", oi, 2)
+        n_gp = node("Gross profit", gp, 1, 0)
+        n_cogs = node("Cost of revenue", cogs, 1, 5)
+        n_oi = node("Operating income", oi, 2, 0)
         opex = gp - oi
-        n_opex = node("Operating expenses", opex, 2)
+        n_opex = node("Operating expenses", opex, 2, 3)
         links += [(n_rev, n_gp, gp, _GREEN),
                   (n_rev, n_cogs, cogs, _RED),
                   (n_gp, n_oi, oi, _GREEN),
                   (n_gp, n_opex, max(opex, 1e-9), _ORANGE)]
 
-        # Opex breakdown (only pieces that exist and fit inside opex).
+        # Opex breakdown lives in the SAME column as the pre-tax node —
+        # ribbons never span across a column (that caused the overlaps).
         known = 0.0
+        rank_c = 3
         for name, v in (("R&D", rd), ("SG&A", sga)):
             if pd.notna(v) and v > 0 and known + v <= opex * 1.02:
-                idx = node(name, v, 3)
+                idx = node(name, v, 3, rank_c)
                 links.append((n_opex, idx, v, _ORANGE))
                 known += v
+                rank_c += 1
         if known > 0 and opex - known > opex * 0.02:
-            idx = node("Other opex", opex - known, 3)
+            idx = node("Other opex", opex - known, 3, rank_c)
             links.append((n_opex, idx, opex - known, _ORANGE))
-        tail_col = 3 if known > 0 else 2  # where the pretax chain starts
 
         if pd.notna(pti) and pd.notna(tax) and pti > 0 and ni > 0 and tax >= 0:
-            n_pti = node("Pre-tax income", pti, tail_col + 1)
+            n_pti = node("Pre-tax income", pti, 3, 0)
             if pti >= oi:
-                n_oth = node("Non-operating income", pti - oi, tail_col)
+                # injection sits directly under Operating income
+                n_oth = node("Non-operating income", pti - oi, 2, 1)
                 links += [(n_oi, n_pti, oi, _GREEN),
                           (n_oth, n_pti, max(pti - oi, 1e-9), _BLUE)]
             else:
-                n_oth = node("Non-operating costs", oi - pti, tail_col + 1)
+                n_oth = node("Non-operating costs", oi - pti, 3, 1)
                 links += [(n_oi, n_pti, pti, _GREEN),
                           (n_oi, n_oth, oi - pti, _ORANGE)]
-            n_ni = node("Net income", ni, tail_col + 2)
-            n_tax = node("Income tax", tax, tail_col + 2)
+            n_ni = node("Net income", ni, 4, 0)
+            n_tax = node("Income tax", tax, 4, 1)
             links += [(n_pti, n_ni, ni, _GREEN2),
                       (n_pti, n_tax, max(tax, 1e-9), _PURPLE)]
         else:
-            n_ni = node("Net income", ni, tail_col + 1)
+            n_ni = node("Net income", ni, 3, 0)
             links.append((n_oi, n_ni, min(ni, oi), _GREEN2))
     else:
         # ---- Financial-sector shape:
@@ -424,40 +430,41 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
         opex_t = (opex_line if pd.notna(opex_line)
                   and abs(opex_line - (rev - pti)) < rev * 0.15
                   else rev - pti)
-        n_pti = node("Pre-tax income", pti, 1)
-        n_opex = node("Operating expenses", opex_t, 1)
+        n_pti = node("Pre-tax income", pti, 1, 0)
+        n_opex = node("Operating expenses", opex_t, 1, 2)
         links += [(n_rev, n_pti, pti, _GREEN),
                   (n_rev, n_opex, max(opex_t, 1e-9), _ORANGE)]
         if pd.notna(comp) and 0 < comp <= opex_t:
-            idx = node("Compensation & benefits", comp, 2)
+            idx = node("Compensation & benefits", comp, 2, 2)
             links.append((n_opex, idx, comp, _ORANGE))
             if opex_t - comp > opex_t * 0.02:
-                idx = node("Other expenses", opex_t - comp, 2)
+                idx = node("Other expenses", opex_t - comp, 2, 3)
                 links.append((n_opex, idx, opex_t - comp, _ORANGE))
-        n_ni = node("Net income", ni, 3)
-        n_tax = node("Income tax", max(tax, 1e-9), 3)
+        n_ni = node("Net income", ni, 2, 0)
+        n_tax = node("Income tax", max(tax, 1e-9), 2, 1)
         links += [(n_pti, n_ni, ni, _GREEN2),
                   (n_pti, n_tax, max(tax, 1e-9), _PURPLE)]
 
-    # ---- Explicit layout: evenly spaced columns; within a column, nodes
-    # stack top-down proportionally to value so children align to parents.
-    n_cols = max(c for _, _, c in nodes) + 1
-    xs, ys = [], []
-    col_totals = {}
-    for _, v, c in nodes:
-        col_totals[c] = col_totals.get(c, 0) + v
+    # ---- Explicit layout: within each column, nodes sort by rank (profit
+    # path on top), thickness is normalized by revenue and top-aligned
+    # across columns so ribbons run straight instead of weaving.
+    order = sorted(range(len(nodes)),
+                   key=lambda i: (nodes[i][2], nodes[i][3]))
+    n_cols = max(n[2] for n in nodes) + 1
+    xs = [0.0] * len(nodes)
+    ys = [0.0] * len(nodes)
     col_cum: dict[int, float] = {}
-    for _, v, c in nodes:
-        total = max(col_totals[c], 1e-9)
+    for i in order:
+        _, v, c, _ = nodes[i]
         cum = col_cum.get(c, 0.0)
-        ys.append(0.05 + 0.88 * (cum + v / 2) / max(total, rev))
-        col_cum[c] = cum + v
-        xs.append(0.02 + 0.96 * c / max(n_cols - 1, 1))
+        ys[i] = min(0.03 + 0.9 * (cum + v / 2) / rev, 0.97)
+        col_cum[c] = cum + v + rev * 0.03  # small gap between nodes
+        xs[i] = 0.02 + 0.96 * c / max(n_cols - 1, 1)
 
     fig = go.Figure(go.Sankey(
-        arrangement="snap",
+        arrangement="fixed",
         node=dict(label=[n[0] for n in nodes], x=xs, y=ys,
-                  pad=22, thickness=16, color=NAVY, line=dict(width=0)),
+                  pad=14, thickness=16, color=NAVY, line=dict(width=0)),
         link=dict(source=[l[0] for l in links],
                   target=[l[1] for l in links],
                   value=[max(l[2], 1e-9) for l in links],
@@ -522,10 +529,20 @@ with tab_data:
         st.stop()
 
     tickers = sorted(companies["ticker"].tolist())
+    # Streamlit ignores `index` once a keyed widget has state, so when the
+    # agent's focus changes we set the widget state directly (both tabs).
     focus = st.session_state.get("focus_ticker")
-    default_idx = tickers.index(focus) if focus in tickers else 0
-    sel = st.selectbox("Company", tickers, index=default_idx,
-                       help="Defaults to the company you last asked the "
+    if focus in tickers and st.session_state.get("_focus_applied") != focus:
+        st.session_state["data_ticker"] = focus
+        st.session_state["overview_ticker"] = focus
+        st.session_state["_focus_applied"] = focus
+    if "data_ticker" not in st.session_state:
+        st.session_state["data_ticker"] = (focus if focus in tickers
+                                           else tickers[0])
+    if st.session_state["data_ticker"] not in tickers:
+        st.session_state["data_ticker"] = tickers[0]
+    sel = st.selectbox("Company", tickers, key="data_ticker",
+                       help="Follows the company you last asked the "
                             "analyst about")
     def _recent(df, years=5.2):
         """Defense-in-depth: keep only periods within `years` of the
@@ -805,17 +822,33 @@ def load_profiles() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def stooq_prices(ticker: str) -> pd.DataFrame:
+def price_history(ticker: str) -> tuple[pd.DataFrame, str]:
+    """Daily closes, ~5y. Stooq first (keyless), yfinance fallback.
+    Returns (df[Date, Close], source_name)."""
     import io
 
     import requests
-    resp = requests.get(f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d",
-                        timeout=20)
-    df = pd.read_csv(io.StringIO(resp.text))
-    if "Close" not in df.columns or df.empty:
-        return pd.DataFrame()
-    df["Date"] = pd.to_datetime(df["Date"])
-    return df.tail(5 * 252)  # ~5 trading years
+    try:
+        resp = requests.get(
+            f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d",
+            headers={"User-Agent": "Mozilla/5.0 (FSA portfolio app)"},
+            timeout=20)
+        df = pd.read_csv(io.StringIO(resp.text))
+        if "Close" in df.columns and len(df) > 10:
+            df["Date"] = pd.to_datetime(df["Date"])
+            return df[["Date", "Close"]].tail(5 * 252), "Stooq"
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        h = yf.Ticker(ticker).history(period="5y", auto_adjust=True)
+        if h is not None and not h.empty:
+            df = h.reset_index()[["Date", "Close"]]
+            df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+            return df, "Yahoo Finance"
+    except Exception:
+        pass
+    return pd.DataFrame(), ""
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -905,9 +938,14 @@ with tab_overview:
 
     tickers_o = sorted(companies_o["ticker"].tolist())
     focus_o = st.session_state.get("focus_ticker")
-    idx_o = tickers_o.index(focus_o) if focus_o in tickers_o else 0
-    sel_o = st.selectbox("Company", tickers_o, index=idx_o,
-                         key="overview_ticker")
+    if "overview_ticker" not in st.session_state:
+        st.session_state["overview_ticker"] = (
+            focus_o if focus_o in tickers_o else tickers_o[0])
+    if st.session_state["overview_ticker"] not in tickers_o:
+        st.session_state["overview_ticker"] = tickers_o[0]
+    sel_o = st.selectbox("Company", tickers_o, key="overview_ticker",
+                         help="Follows the company you last asked the "
+                              "analyst about")
 
     prof = (profiles[profiles["ticker"] == sel_o].iloc[0]
             if not profiles.empty
@@ -953,7 +991,7 @@ with tab_overview:
             st.caption("No headlines found.")
 
     with colR:
-        px_df = stooq_prices(sel_o)
+        px_df, px_src = price_history(sel_o)
         if not px_df.empty:
             last_close = px_df["Close"].iloc[-1]
             yr = px_df[px_df["Date"] >= px_df["Date"].max()
@@ -980,10 +1018,11 @@ with tab_overview:
                          stepmode="backward"),
                     dict(label="5y", step="all")])))
             st.plotly_chart(figp, use_container_width=True)
-            st.caption("Daily close, Stooq (EOD).")
+            st.caption(f"Daily close (EOD), source: {px_src}.")
         else:
-            st.caption("Price history unavailable from Stooq for this "
-                       "ticker.")
+            st.caption("Price history unavailable (Stooq and Yahoo "
+                       "Finance both failed — possibly network egress "
+                       "or rate limits).")
 
     st.subheader("Peers in your catalog (same SIC sector)")
     if prof is not None and not profiles.empty:
