@@ -18,6 +18,7 @@ import re
 # Revenue tags to look for (mirrors statements.LINE_ITEMS["revenue"]).
 REVENUE_TAGS = {
     "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+    "us-gaap:RevenuesNetOfInterestExpense",  # banks
     "us-gaap:Revenues",
     "us-gaap:SalesRevenueNet",
     "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",

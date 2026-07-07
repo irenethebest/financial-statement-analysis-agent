@@ -17,6 +17,7 @@ Env (set by databricks.yml):
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -272,6 +273,22 @@ with tab_agent:
                               expanded=False)
                 st.markdown(md(answer))
                 st.session_state.chat.append(("assistant", answer))
+                # Remember which company the agent worked on so the
+                # Ratios & red flags tab opens on it.
+                called = []
+                for m in trail:
+                    if not isinstance(m, dict):
+                        continue
+                    for tc in m.get("tool_calls") or []:
+                        try:
+                            t = json.loads(
+                                tc["function"]["arguments"]).get("p_ticker")
+                            if t:
+                                called.append(str(t).upper().strip())
+                        except Exception:
+                            pass
+                if called:
+                    st.session_state.focus_ticker = called[-1]
             except Exception as exc:
                 status.update(label="Failed", state="error")
                 st.error(f"Agent error: {exc}")
@@ -319,8 +336,18 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
     pti = row.get("pretax_income")
     rd, sga = row.get("rd_expense"), row.get("sga_expense")
 
-    core = [rev, cogs, gp, oi, ni]
-    if any(v is None or pd.isna(v) or v <= 0 for v in core):
+    comp = row.get("compensation_expense")
+    opex_line = row.get("operating_expenses")
+
+    if any(v is None or pd.isna(v) or v <= 0 for v in [rev, ni]):
+        return None
+    # Standard shape needs COGS/gross/operating income; financial-sector
+    # filers (banks) have none of those — use revenue -> expenses -> pretax.
+    standard = not any(v is None or pd.isna(v) or v <= 0
+                       for v in [cogs, gp, oi])
+    fin_ok = (pd.notna(pti) and 0 < pti <= rev and pd.notna(tax)
+              and tax >= 0 and ni > 0)
+    if not standard and not fin_ok:
         return None
 
     # nodes: (label, $value, column). links: (src, dst, value, color)
@@ -349,45 +376,67 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
             nodes.append((f"{name}<br>{_b(v)} · {v / rev:.0%}", v, 0))
             links.append((idx, n_rev, max(v, 1e-9), _BLUE))
 
-    n_gp = node("Gross profit", gp, 1)
-    n_cogs = node("Cost of revenue", cogs, 1)
-    n_oi = node("Operating income", oi, 2)
-    opex = gp - oi
-    n_opex = node("Operating expenses", opex, 2)
-    links += [(n_rev, n_gp, gp, _GREEN),
-              (n_rev, n_cogs, cogs, _RED),
-              (n_gp, n_oi, oi, _GREEN),
-              (n_gp, n_opex, max(opex, 1e-9), _ORANGE)]
+    if standard:
+        n_gp = node("Gross profit", gp, 1)
+        n_cogs = node("Cost of revenue", cogs, 1)
+        n_oi = node("Operating income", oi, 2)
+        opex = gp - oi
+        n_opex = node("Operating expenses", opex, 2)
+        links += [(n_rev, n_gp, gp, _GREEN),
+                  (n_rev, n_cogs, cogs, _RED),
+                  (n_gp, n_oi, oi, _GREEN),
+                  (n_gp, n_opex, max(opex, 1e-9), _ORANGE)]
 
-    # Opex breakdown (only pieces that exist and fit inside opex).
-    known = 0.0
-    for name, v in (("R&D", rd), ("SG&A", sga)):
-        if pd.notna(v) and v > 0 and known + v <= opex * 1.02:
-            idx = node(name, v, 3)
-            links.append((n_opex, idx, v, _ORANGE))
-            known += v
-    if known > 0 and opex - known > opex * 0.02:
-        idx = node("Other opex", opex - known, 3)
-        links.append((n_opex, idx, opex - known, _ORANGE))
-    tail_col = 3 if known > 0 else 2  # where the pretax chain starts
+        # Opex breakdown (only pieces that exist and fit inside opex).
+        known = 0.0
+        for name, v in (("R&D", rd), ("SG&A", sga)):
+            if pd.notna(v) and v > 0 and known + v <= opex * 1.02:
+                idx = node(name, v, 3)
+                links.append((n_opex, idx, v, _ORANGE))
+                known += v
+        if known > 0 and opex - known > opex * 0.02:
+            idx = node("Other opex", opex - known, 3)
+            links.append((n_opex, idx, opex - known, _ORANGE))
+        tail_col = 3 if known > 0 else 2  # where the pretax chain starts
 
-    if pd.notna(pti) and pd.notna(tax) and pti > 0 and ni > 0 and tax >= 0:
-        n_pti = node("Pre-tax income", pti, tail_col + 1)
-        if pti >= oi:
-            n_oth = node("Non-operating income", pti - oi, tail_col)
-            links += [(n_oi, n_pti, oi, _GREEN),
-                      (n_oth, n_pti, max(pti - oi, 1e-9), _BLUE)]
+        if pd.notna(pti) and pd.notna(tax) and pti > 0 and ni > 0 and tax >= 0:
+            n_pti = node("Pre-tax income", pti, tail_col + 1)
+            if pti >= oi:
+                n_oth = node("Non-operating income", pti - oi, tail_col)
+                links += [(n_oi, n_pti, oi, _GREEN),
+                          (n_oth, n_pti, max(pti - oi, 1e-9), _BLUE)]
+            else:
+                n_oth = node("Non-operating costs", oi - pti, tail_col + 1)
+                links += [(n_oi, n_pti, pti, _GREEN),
+                          (n_oi, n_oth, oi - pti, _ORANGE)]
+            n_ni = node("Net income", ni, tail_col + 2)
+            n_tax = node("Income tax", tax, tail_col + 2)
+            links += [(n_pti, n_ni, ni, _GREEN2),
+                      (n_pti, n_tax, max(tax, 1e-9), _PURPLE)]
         else:
-            n_oth = node("Non-operating costs", oi - pti, tail_col + 1)
-            links += [(n_oi, n_pti, pti, _GREEN),
-                      (n_oi, n_oth, oi - pti, _ORANGE)]
-        n_ni = node("Net income", ni, tail_col + 2)
-        n_tax = node("Income tax", tax, tail_col + 2)
+            n_ni = node("Net income", ni, tail_col + 1)
+            links.append((n_oi, n_ni, min(ni, oi), _GREEN2))
+    else:
+        # ---- Financial-sector shape:
+        # Revenue -> Pre-tax income + Total operating expenses,
+        # expenses -> Compensation / Other, pre-tax -> Net income + Tax.
+        opex_t = (opex_line if pd.notna(opex_line)
+                  and abs(opex_line - (rev - pti)) < rev * 0.15
+                  else rev - pti)
+        n_pti = node("Pre-tax income", pti, 1)
+        n_opex = node("Operating expenses", opex_t, 1)
+        links += [(n_rev, n_pti, pti, _GREEN),
+                  (n_rev, n_opex, max(opex_t, 1e-9), _ORANGE)]
+        if pd.notna(comp) and 0 < comp <= opex_t:
+            idx = node("Compensation & benefits", comp, 2)
+            links.append((n_opex, idx, comp, _ORANGE))
+            if opex_t - comp > opex_t * 0.02:
+                idx = node("Other expenses", opex_t - comp, 2)
+                links.append((n_opex, idx, opex_t - comp, _ORANGE))
+        n_ni = node("Net income", ni, 3)
+        n_tax = node("Income tax", max(tax, 1e-9), 3)
         links += [(n_pti, n_ni, ni, _GREEN2),
                   (n_pti, n_tax, max(tax, 1e-9), _PURPLE)]
-    else:
-        n_ni = node("Net income", ni, tail_col + 1)
-        links.append((n_oi, n_ni, min(ni, oi), _GREEN2))
 
     # ---- Explicit layout: evenly spaced columns; within a column, nodes
     # stack top-down proportionally to value so children align to parents.
@@ -418,21 +467,37 @@ def build_income_flow(row, segments=None) -> "go.Figure | None":
     return fig
 
 
-def build_income_waterfall(row) -> "go.Figure":
-    """Waterfall fallback — handles losses gracefully."""
+def build_income_waterfall(row) -> "go.Figure | None":
+    """Waterfall fallback — handles losses and bank-style statements.
+    Returns None when there isn't enough data for a meaningful chart."""
     import plotly.graph_objects as go
 
-    steps = [("Revenue", row.get("revenue"), "absolute"),
-             ("Cost of revenue", -(row.get("cost_of_revenue") or 0), "relative"),
-             ("Operating expenses",
-              -((row.get("gross_profit") or 0) - (row.get("operating_income") or 0)),
-              "relative")]
+    rev, ni = row.get("revenue"), row.get("net_income")
+    if pd.isna(rev) or pd.isna(ni):
+        return None
+    cogs, gp = row.get("cost_of_revenue"), row.get("gross_profit")
     oi, pti = row.get("operating_income"), row.get("pretax_income")
-    if pd.notna(pti) and pd.notna(oi):
-        steps.append(("Non-operating, net", pti - oi, "relative"))
-    if pd.notna(row.get("income_tax_expense")):
-        steps.append(("Income tax", -row["income_tax_expense"], "relative"))
-    steps.append(("Net income", row.get("net_income"), "total"))
+    tax = row.get("income_tax_expense")
+    opex_line = row.get("operating_expenses")
+
+    steps = [("Revenue", rev, "absolute")]
+    if pd.notna(cogs) and pd.notna(gp) and pd.notna(oi):
+        steps += [("Cost of revenue", -cogs, "relative"),
+                  ("Operating expenses", -(gp - oi), "relative")]
+        if pd.notna(pti):
+            steps.append(("Non-operating, net", pti - oi, "relative"))
+    elif pd.notna(pti):  # bank-style: one total-expenses step
+        opex_t = (opex_line if pd.notna(opex_line)
+                  and abs(opex_line - (rev - pti)) < abs(rev) * 0.15
+                  else rev - pti)
+        steps.append(("Operating expenses", -opex_t, "relative"))
+    elif pd.notna(opex_line):
+        steps.append(("Operating expenses", -opex_line, "relative"))
+    else:
+        return None
+    if pd.notna(tax):
+        steps.append(("Income tax", -tax, "relative"))
+    steps.append(("Net income", ni, "total"))
 
     fig = go.Figure(go.Waterfall(
         x=[s[0] for s in steps],
@@ -456,7 +521,11 @@ with tab_data:
         st.stop()
 
     tickers = sorted(companies["ticker"].tolist())
-    sel = st.selectbox("Company", tickers)
+    focus = st.session_state.get("focus_ticker")
+    default_idx = tickers.index(focus) if focus in tickers else 0
+    sel = st.selectbox("Company", tickers, index=default_idx,
+                       help="Defaults to the company you last asked the "
+                            "analyst about")
     r = ratios[ratios["ticker"] == sel].sort_values("period_end").copy()
     a = anomalies[anomalies["ticker"] == sel].copy()
     w = wides[wides["ticker"] == sel].sort_values("period_end").copy()
@@ -516,11 +585,15 @@ with tab_data:
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("Sankey needs positive flows — this company had "
-                        "losses or missing items, showing a waterfall "
-                        "instead (negatives welcome).")
-                st.plotly_chart(build_income_waterfall(wlast),
-                                use_container_width=True)
+                wf = build_income_waterfall(wlast)
+                if wf is not None:
+                    st.info("Sankey needs positive flows — this company had "
+                            "losses or missing items, showing a waterfall "
+                            "instead (negatives welcome).")
+                    st.plotly_chart(wf, use_container_width=True)
+                else:
+                    st.info("Not enough extracted line items to draw the "
+                            "income statement flow for this company.")
 
             # ---- Common-size / growth analysis ----
             st.subheader("Income statement analysis")
@@ -576,84 +649,91 @@ with tab_data:
     with sub_trend:
         import plotly.graph_objects as go
 
+        _SKIP_NOTE = ("Not reported by this company — financial-sector "
+                      "filers use a different statement structure.")
+
+        def _cols_with_data(df_, specs):
+            return [(c, n, col) for c, n, col in specs
+                    if c in df_.columns and df_[c].notna().any()]
+
+        def _bar_chart(df_, specs, title, tickformat=None, caption=None):
+            st.subheader(title)
+            specs = _cols_with_data(df_, specs)
+            if not specs:
+                st.caption(_SKIP_NOTE)
+                return
+            if caption:
+                st.caption(caption)
+            fig = go.Figure()
+            for c, n, color in specs:
+                fig.add_bar(x=df_["fy"], y=df_[c], name=n, marker_color=color)
+            fig.update_layout(barmode="group", height=300,
+                              margin=dict(t=10, b=10),
+                              yaxis_tickformat=tickformat,
+                              legend=dict(orientation="h", y=1.15))
+            st.plotly_chart(fig, use_container_width=True)
+
+        def _line_chart(df_, specs, title, tickformat=None):
+            st.subheader(title)
+            specs = _cols_with_data(df_, specs)
+            if not specs:
+                st.caption(_SKIP_NOTE)
+                return
+            fig = go.Figure()
+            for c, n, color in specs:
+                fig.add_scatter(x=df_["fy"], y=df_[c], name=n,
+                                mode="lines+markers", line=dict(color=color))
+            fig.update_layout(height=300, margin=dict(t=10, b=10),
+                              yaxis_tickformat=tickformat,
+                              legend=dict(orientation="h", y=1.15))
+            st.plotly_chart(fig, use_container_width=True)
+
         t1, t2 = st.columns(2)
         with t1:
-            st.subheader("Earnings")
-            fig = go.Figure()
-            for col, name, color in [("revenue", "Revenue", NAVY),
-                                     ("operating_income", "Operating income", ACCENT),
-                                     ("net_income", "Net income", GOOD)]:
-                fig.add_bar(x=w["fy"], y=w[col], name=name, marker_color=color)
-            fig.update_layout(barmode="group", height=320,
-                              margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Margins")
-            fig = go.Figure()
-            for col, name, color in [("gross_margin", "Gross", NAVY),
-                                     ("operating_margin", "Operating", ACCENT),
-                                     ("net_margin", "Net", GOOD)]:
-                fig.add_scatter(x=r["fy"], y=r[col], name=name, mode="lines+markers",
-                                line=dict(color=color))
-            fig.update_layout(height=300, yaxis_tickformat=".0%",
-                              margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.15))
-            st.plotly_chart(fig, use_container_width=True)
+            _bar_chart(w, [("revenue", "Revenue", NAVY),
+                           ("operating_income", "Operating income", ACCENT),
+                           ("net_income", "Net income", GOOD)],
+                       "Earnings")
+            _line_chart(r, [("gross_margin", "Gross", NAVY),
+                            ("operating_margin", "Operating", ACCENT),
+                            ("net_margin", "Net", GOOD)],
+                        "Margins", tickformat=".0%")
 
             st.subheader("Cash conversion cycle (days)")
-            fig = go.Figure()
-            fig.add_bar(x=r["fy"], y=r["dso_days"], name="DSO (collect)",
-                        marker_color=ACCENT)
-            fig.add_bar(x=r["fy"], y=r["dio_days"], name="DIO (hold inventory)",
-                        marker_color=WARN)
-            fig.add_bar(x=r["fy"], y=-r["dpo_days"], name="DPO (pay suppliers)",
-                        marker_color=TEAL)
-            fig.add_scatter(x=r["fy"], y=r["cash_conversion_cycle_days"],
-                            name="CCC", mode="lines+markers",
-                            line=dict(color=NAVY, width=3))
-            fig.update_layout(barmode="relative", height=300,
-                              margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.15))
-            st.plotly_chart(fig, use_container_width=True)
+            if r["dso_days"].notna().any() or r["dio_days"].notna().any():
+                fig = go.Figure()
+                fig.add_bar(x=r["fy"], y=r["dso_days"], name="DSO (collect)",
+                            marker_color=ACCENT)
+                fig.add_bar(x=r["fy"], y=r["dio_days"],
+                            name="DIO (hold inventory)", marker_color=WARN)
+                fig.add_bar(x=r["fy"], y=-r["dpo_days"],
+                            name="DPO (pay suppliers)", marker_color=TEAL)
+                fig.add_scatter(x=r["fy"], y=r["cash_conversion_cycle_days"],
+                                name="CCC", mode="lines+markers",
+                                line=dict(color=NAVY, width=3))
+                fig.update_layout(barmode="relative", height=300,
+                                  margin=dict(t=10, b=10),
+                                  legend=dict(orientation="h", y=1.15))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption(_SKIP_NOTE)
 
         with t2:
-            st.subheader("Returns & efficiency")
-            fig = go.Figure()
-            fig.add_scatter(x=r["fy"], y=r["roe"], name="ROE",
-                            mode="lines+markers", line=dict(color=NAVY, width=3))
-            fig.add_scatter(x=r["fy"], y=r["roa"], name="ROA",
-                            mode="lines+markers", line=dict(color=GOOD))
-            fig.add_scatter(x=r["fy"], y=r["dupont_asset_turnover"],
-                            name="Asset turnover (x)", mode="lines+markers",
-                            line=dict(color=WARN, dash="dot"))
-            fig.update_layout(height=320, margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Receivables vs revenue growth")
-            st.caption("When the orange bar tops the blue one, the "
-                       "ar_outpaces_revenue red flag territory begins.")
-            fig = go.Figure()
-            fig.add_bar(x=r["fy"], y=r["revenue_growth"], name="Revenue growth",
-                        marker_color=ACCENT)
-            fig.add_bar(x=r["fy"], y=r["accounts_receivable_growth"],
-                        name="AR growth", marker_color=WARN)
-            fig.update_layout(barmode="group", height=300,
-                              yaxis_tickformat=".0%", margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.15))
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Profit vs cash: NI and OCF")
-            fig = go.Figure()
-            fig.add_bar(x=w["fy"], y=w["net_income"], name="Net income",
-                        marker_color=NAVY)
-            fig.add_bar(x=w["fy"], y=w["operating_cash_flow"],
-                        name="Operating cash flow", marker_color=GOOD)
-            fig.update_layout(barmode="group", height=300,
-                              margin=dict(t=10, b=10),
-                              legend=dict(orientation="h", y=1.15))
-            st.plotly_chart(fig, use_container_width=True)
+            _line_chart(r, [("roe", "ROE", NAVY),
+                            ("roa", "ROA", GOOD),
+                            ("dupont_asset_turnover", "Asset turnover (x)",
+                             WARN)],
+                        "Returns & efficiency")
+            _bar_chart(r, [("revenue_growth", "Revenue growth", ACCENT),
+                           ("accounts_receivable_growth", "AR growth", WARN)],
+                       "Receivables vs revenue growth", tickformat=".0%",
+                       caption="When the orange bar tops the blue one, "
+                               "ar_outpaces_revenue red-flag territory "
+                               "begins.")
+            _bar_chart(w, [("net_income", "Net income", NAVY),
+                           ("operating_cash_flow", "Operating cash flow",
+                            GOOD)],
+                       "Profit vs cash: NI and OCF")
 
     # ---- Red flags ----
     with sub_flags:

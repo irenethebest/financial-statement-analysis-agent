@@ -19,6 +19,7 @@ LINE_ITEMS: dict[str, dict] = {
         "statement": "IS", "kind": "duration",
         "tags": [
             "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "RevenuesNetOfInterestExpense",  # banks: "total net revenues"
             "Revenues",
             "SalesRevenueNet",
             "RevenueFromContractWithCustomerIncludingAssessedTax",
@@ -50,6 +51,18 @@ LINE_ITEMS: dict[str, dict] = {
         "statement": "IS", "kind": "duration",
         "tags": ["SellingGeneralAndAdministrativeExpense",
                  "GeneralAndAdministrativeExpense"],
+    },
+    "operating_expenses": {
+        # Explicit total-expense lines. Crucial for financial-sector
+        # filers (banks report NoninterestExpense, no COGS/gross profit).
+        "statement": "IS", "kind": "duration",
+        "tags": ["NoninterestExpense", "OperatingExpenses",
+                 "CostsAndExpenses", "BenefitsLossesAndExpenses"],
+    },
+    "compensation_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["LaborAndRelatedExpense",
+                 "SalariesWagesAndOfficersCompensation"],
     },
     "interest_expense": {
         "statement": "IS", "kind": "duration",
