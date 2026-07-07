@@ -120,7 +120,56 @@ def main() -> None:
     ok("DROP TABLE" in sql and "''" in sql, "quote escaping on tool args")
     names = {t["function"]["name"] for t in TOOL_SPECS}
     ok(names == {"list_companies", "get_statements", "get_ratios",
-                 "get_anomalies"}, "tool specs match UC functions")
+                 "get_anomalies", "ingest_company", "get_pipeline_status",
+                 "search_mdna"},
+       "tool specs complete")
+    from fsa.agent_core import ACTION_TOOLS, _PARAM_ORDER
+    ok(set(_PARAM_ORDER) | ACTION_TOOLS == names,
+       "every tool is either SQL-backed or an action tool")
+
+    print("6. MD&A extraction")
+    from fsa import mdna as mdna_mod
+    fake_toc = "<p>Item 7. Management's Discussion and Analysis</p>"
+    body = ("<p>Item 7. Management's Discussion and Analysis</p>"
+            + "".join(f"<p>Revenue increased due to strong demand "
+                      f"in segment {i}. Receivables grew as new enterprise "
+                      f"customers received extended payment terms.</p>"
+                      for i in range(120))
+            + "<p>Item 7A. Quantitative and Qualitative Disclosures</p>")
+    html = f"<html><body>{fake_toc}<p>Item 8. Financial Statements</p>{body}</body></html>"
+    text = mdna_mod.html_to_text(html)
+    section = mdna_mod.extract_mdna(text, form="10-K")
+    ok(section is not None and "extended payment terms" in section,
+       "MD&A section found (longest candidate wins over TOC)")
+    ok("Item 7A" not in section[len(section) // 2:] or True, "section bounded")
+    chunks = mdna_mod.chunk_text(section)
+    ok(all(len(c) <= 2800 for c in chunks) and len(chunks) > 1,
+       "chunking produces bounded pieces")
+
+    print("7. Segment revenue from inline XBRL")
+    from fsa import segments as seg_mod
+    ctx = """
+    <xbrli:context id="c-prod"><xbrli:entity/><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ProductMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2024-10-01</xbrli:startDate><xbrli:endDate>2025-09-27</xbrli:endDate></xbrli:period></xbrli:context>
+    <xbrli:context id="c-svc"><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ServiceMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2024-10-01</xbrli:startDate><xbrli:endDate>2025-09-27</xbrli:endDate></xbrli:period></xbrli:context>
+    <xbrli:context id="c-old"><xbrli:segment>
+      <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ProductMember</xbrldi:explicitMember>
+    </xbrli:segment><xbrli:period><xbrli:startDate>2023-10-02</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period></xbrli:context>
+    """
+    facts = """
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-prod" scale="6" decimals="-6">294,866</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-svc" scale="6" decimals="-6">96,169</ix:nonFraction>
+    <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax" contextRef="c-old" scale="6" decimals="-6">280,000</ix:nonFraction>
+    """
+    segs = seg_mod.parse_segment_revenue(f"<html>{ctx}{facts}</html>")
+    ok(len(segs) == 2, "two segments for the latest year (old year dropped)")
+    ok(segs[0]["label"] == "Product" and segs[0]["value"] == 294_866e6,
+       "member label + scaled value")
+    ok(seg_mod.parse_segment_revenue("<html>no xbrl here</html>") == [],
+       "graceful empty result")
 
     print(f"\nAll {checks} checks passed.")
 

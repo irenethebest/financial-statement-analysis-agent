@@ -83,6 +83,31 @@ RETURN (
 
 # COMMAND ----------
 
+spark.sql(f"""
+CREATE OR REPLACE FUNCTION {FQ}.search_mdna(
+  p_ticker STRING COMMENT 'Stock ticker, e.g. AAPL',
+  p_query STRING COMMENT 'Space-separated keywords to search for, e.g. "receivables collection customers"'
+)
+RETURNS STRING
+COMMENT 'Keyword search over the Management''s Discussion & Analysis (MD&A) narrative of the company''s recent 10-K filings. Returns a JSON array of {{filing_date, score, excerpt}} — the best-matching passages, ranked by how many keywords they contain. Use this to find management''s own explanation of revenue drivers, liquidity, risks, or to cross-check red flags against what management says. Empty array = no match; try different keywords.'
+RETURN (
+  SELECT to_json(collect_list(struct(filing_date, score, excerpt)))
+  FROM (
+    SELECT filing_date,
+           substr(chunk_text, 1, 1200) AS excerpt,
+           size(filter(split(lower(p_query), ' '),
+                       t -> t != '' AND contains(lower(chunk_text), t))) AS score
+    FROM {CATALOG}.silver.mdna_chunks
+    WHERE ticker = upper(p_ticker)
+    ORDER BY score DESC, filing_date DESC, chunk_id
+    LIMIT 6
+  )
+  WHERE score > 0
+)
+""")
+
+# COMMAND ----------
+
 # MAGIC %md ### Smoke test
 
 # COMMAND ----------
@@ -90,7 +115,8 @@ RETURN (
 for fn, args in [("list_companies", ""),
                  ("get_statements", "'AAPL','IS'"),
                  ("get_ratios", "'AAPL'"),
-                 ("get_anomalies", "'AAPL'")]:
+                 ("get_anomalies", "'AAPL'"),
+                 ("search_mdna", "'AAPL','revenue growth'")]:
     out = spark.sql(f"SELECT {FQ}.{fn}({args}) AS r").first()["r"]
     preview = (out or "NULL")[:160]
     print(f"{fn}({args}) -> {preview} ...")

@@ -7,15 +7,59 @@ deterministic pipeline code and Unity Catalog functions; Claude decides
 which tool to call and narrates the JSON that comes back.
 
 The loop speaks the OpenAI chat-completions protocol, which Databricks
-Foundation Model APIs expose natively — so the same code runs against
-`databricks-claude-sonnet-4` in a notebook, in the app, or (if deployed)
-behind a Model Serving endpoint.
+Foundation Model APIs expose natively — so it is model-agnostic: Llama 4
+Maverick on Free Edition (Claude/GPT are trust-tier gated there), Claude
+on paid workspaces. One config variable, no code change.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable
+
+# Some open models write tool calls as prose — "[get_ratios(...)]", bare
+# "get_ratios(p_ticker=X)", or leaked chat-template tokens like "/ipython" —
+# instead of emitting native tool calls. Detect it so the loop can correct
+# course rather than return a hallucinated transcript to the user.
+_FAKE_TOOL_CALL = re.compile(
+    r"(?:get_statements|get_ratios|get_anomalies|list_companies"
+    r"|ingest_company|get_pipeline_status|search_mdna)\s*\("
+    r"|/ipython|<\|python_tag\|>|<\|eom\|>")
+
+
+def is_fake_tool_text(text: str) -> bool:
+    """True if a message narrates tool calls instead of making them."""
+    return bool(_FAKE_TOOL_CALL.search(text or ""))
+
+
+def content_to_text(content) -> str:
+    """Normalize message content to a plain string.
+
+    Reasoning models (e.g. gpt-oss) return content as a list of typed
+    parts rather than a string; keep only the text parts.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                if p.get("type") in (None, "text", "output_text"):
+                    t = p.get("text")
+                    if isinstance(t, str):
+                        parts.append(t)
+            else:  # SDK objects
+                if getattr(p, "type", "text") in ("text", "output_text"):
+                    t = getattr(p, "text", None)
+                    if isinstance(t, str):
+                        parts.append(t)
+        return "\n".join(x for x in parts if x).strip()
+    return str(content)
 
 SYSTEM_PROMPT = """\
 You are a financial statement analyst. You explain SEC filings to smart
@@ -28,6 +72,18 @@ Hard rules:
   array, say no rules fired — do not invent concerns.
 - If a value is missing/null, say the company didn't report it that way
   rather than guessing.
+- Call tools ONLY through the tool-calling mechanism. Never write tool
+  names, function-call syntax, or bracketed calls like [get_ratios(...)]
+  in your prose.
+- Gather ALL the data you need first (statements, ratios, anomalies),
+  THEN write the answer. Your final message must be the complete,
+  finished analysis — never a promise of further analysis.
+- Only companies returned by list_companies are analyzable right now.
+  If asked about any other company, call ingest_company ONCE with its
+  ticker — this starts the governed ingestion pipeline (takes a few
+  minutes). Then tell the user ingestion has started and to ask again
+  shortly. Never fabricate analysis while data is being ingested. If the
+  user asks whether it's ready, call get_pipeline_status.
 
 When asked to analyze a company, follow this shape:
 1. One-paragraph plain-English verdict up front.
@@ -38,7 +94,9 @@ When asked to analyze a company, follow this shape:
 4. DuPont ROE story: is return on equity driven by margins, by asset
    efficiency, or by leverage? Explain what that mix means.
 5. Red flags from get_anomalies, each explained in one plain sentence,
-   ordered by severity. Include the 'so what'.
+   ordered by severity. Include the 'so what'. When a flag fires, use
+   search_mdna to check whether management addresses it in the MD&A and
+   note whether their explanation is convincing — quote briefly if useful.
 6. Close with 2-3 things a curious reader should watch next year.
 
 Define every technical term in parentheses the first time you use it.
@@ -101,7 +159,49 @@ TOOL_SPECS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_mdna",
+            "description": "Keyword search over the MD&A (Management's Discussion & Analysis) narrative of the company's recent 10-K filings. Returns best-matching passages with filing dates. Use it to find management's own explanation of trends, liquidity, and risks — especially to cross-check red flags from get_anomalies against what management says.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "p_ticker": {"type": "string", "description": "Stock ticker, e.g. AAPL"},
+                    "p_query": {"type": "string",
+                                "description": "Space-separated keywords, e.g. 'receivables collection customers'"},
+                },
+                "required": ["p_ticker", "p_query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ingest_company",
+            "description": "Start the governed ingestion pipeline (SEC EDGAR -> bronze -> silver -> gold) for a US-listed SEC filer that is NOT yet in list_companies. Takes a few minutes; existing companies are preserved. Call at most once per company, then tell the user to ask again shortly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "p_ticker": {"type": "string",
+                                 "description": "Stock ticker to ingest, e.g. APLD"},
+                },
+                "required": ["p_ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pipeline_status",
+            "description": "Check whether the ingestion pipeline is currently running or when it last finished. Use when the user asks if newly requested data is ready.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
+
+# Tools implemented client-side (Jobs API), not as UC SQL functions.
+ACTION_TOOLS = {"ingest_company", "get_pipeline_status"}
 
 # Positional parameter order of each UC function (SQL UDFs are positional).
 _PARAM_ORDER = {
@@ -109,6 +209,7 @@ _PARAM_ORDER = {
     "get_statements": ["p_ticker", "p_statement"],
     "get_ratios": ["p_ticker"],
     "get_anomalies": ["p_ticker"],
+    "search_mdna": ["p_ticker", "p_query"],
 }
 
 
@@ -154,22 +255,40 @@ def run_agent(
     messages.append({"role": "user", "content": user_message})
 
     for _turn in range(max_turns):
+        notify(f"Thinking (step {_turn + 1}/{max_turns})…")
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOL_SPECS,
             max_tokens=4000,
+            temperature=0.2,  # analysis, not creativity — stay on rails
+            timeout=120,      # never hang silently on a single LLM call
         )
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
-            return msg.content or "", messages + [
-                {"role": "assistant", "content": msg.content}
+            content = content_to_text(msg.content)
+            if _FAKE_TOOL_CALL.search(content) and _turn < max_turns - 1:
+                # The model narrated tool calls instead of making them.
+                notify("Model wrote tool syntax as text — nudging it to "
+                       "use real tool calls")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Nothing was executed — you wrote tool-call syntax "
+                        "as text. Invoke tools through the tool-calling "
+                        "mechanism now, or give your complete final answer "
+                        "using only data already retrieved."),
+                })
+                continue
+            return content, messages + [
+                {"role": "assistant", "content": content}
             ]
 
         messages.append({
             "role": "assistant",
-            "content": msg.content,
+            "content": content_to_text(msg.content),
             "tool_calls": [
                 {
                     "id": tc.id,

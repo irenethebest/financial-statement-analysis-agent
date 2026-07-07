@@ -38,11 +38,19 @@ variables:
     description: SQL warehouse the app queries and runs UC tools on
     default: "0f9084bee8c224a2"
   llm_endpoint:
+    # Free Edition gates premium models (Claude/GPT-5) to a rate limit of 0;
+    # open models are not gated. gpt-oss-120b over llama-4-maverick: Maverick
+    # tends to hallucinate tool transcripts as text instead of emitting
+    # native tool calls. On a paid workspace, switch to
+    # databricks-claude-sonnet-5 — same agent loop, no code change.
     description: Pay-per-token Foundation Model endpoint for the agent
-    default: databricks-claude-sonnet-4
+    default: databricks-gpt-oss-120b
   notification_email:
     description: Address for job-failure alerts
     default: irenejinheechoi@gmail.com
+  owner_user:
+    description: Workspace user granted access to CI-created catalogs and the app
+    default: jchoi867@gatech.edu
 
 targets:
   dev:
@@ -104,6 +112,7 @@ resources:
               catalog: ${var.catalog}
               tickers: ${var.tickers}
               user_agent_email: ${var.user_agent_email}
+              owner_user: ${var.owner_user}
 
         # 02 — bronze -> {catalog}.silver.{statements, statements_wide}
         - task_key: build_statements
@@ -113,7 +122,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               form: "10-K"
-              periods: "6"
+              periods: "5"
 
         # 03 — silver -> {catalog}.gold.{ratios, anomalies}
         - task_key: ratios_anomalies
@@ -136,31 +145,25 @@ resources:
       name: fsa-agent-${var.env}
       description: SEC filing analysis — Claude agent over UC-governed tools
       source_code_path: ./app
-      config:
-        command:
-          - streamlit
-          - run
-          - app.py
-          - --server.port=8000
-          - --server.address=0.0.0.0
-        env:
-          - name: DATABRICKS_WAREHOUSE_ID
-            value: ${var.warehouse_id}
-          - name: APP_CATALOG
-            value: ${var.catalog}
-          - name: LLM_ENDPOINT
-            value: ${var.llm_endpoint}
+      # NOTE: command + env live in app/app.yaml (current Databricks Apps
+      # ignore a `config:` block here). Env values are injected from the
+      # resource bindings below via `valueFrom`.
       resources:
         - name: sql_warehouse
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: CAN_USE
-        # Lets the app's service principal call the pay-per-token Claude
+        # Lets the app's service principal call the pay-per-token model
         # endpoint without extra grants.
         - name: llm
           serving_endpoint:
             name: ${var.llm_endpoint}
             permission: CAN_QUERY
+        # Lets the agent's ingest_company tool trigger the pipeline.
+        - name: pipeline
+          job:
+            id: ${resources.jobs.fsa_pipeline.id}
+            permission: CAN_MANAGE_RUN
       permissions:
         - level: CAN_MANAGE
-          user_name: irenejinheechoi@gmail.com
+          user_name: ${var.owner_user}

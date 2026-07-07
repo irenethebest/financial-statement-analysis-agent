@@ -19,6 +19,7 @@ LINE_ITEMS: dict[str, dict] = {
         "statement": "IS", "kind": "duration",
         "tags": [
             "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "RevenuesNetOfInterestExpense",  # banks: "total net revenues"
             "Revenues",
             "SalesRevenueNet",
             "RevenueFromContractWithCustomerIncludingAssessedTax",
@@ -40,6 +41,28 @@ LINE_ITEMS: dict[str, dict] = {
     "operating_income": {
         "statement": "IS", "kind": "duration",
         "tags": ["OperatingIncomeLoss"],
+    },
+    "rd_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["ResearchAndDevelopmentExpense",
+                 "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
+    },
+    "sga_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["SellingGeneralAndAdministrativeExpense",
+                 "GeneralAndAdministrativeExpense"],
+    },
+    "operating_expenses": {
+        # Explicit total-expense lines. Crucial for financial-sector
+        # filers (banks report NoninterestExpense, no COGS/gross profit).
+        "statement": "IS", "kind": "duration",
+        "tags": ["NoninterestExpense", "OperatingExpenses",
+                 "CostsAndExpenses", "BenefitsLossesAndExpenses"],
+    },
+    "compensation_expense": {
+        "statement": "IS", "kind": "duration",
+        "tags": ["LaborAndRelatedExpense",
+                 "SalariesWagesAndOfficersCompensation"],
     },
     "interest_expense": {
         "statement": "IS", "kind": "duration",
@@ -218,7 +241,17 @@ def build_statements(
                      "fiscal_year", "fiscal_period", "form", "value",
                      "tag_used", "filed"]
         )
-    return pd.concat(out_frames, ignore_index=True)
+    tidy = pd.concat(out_frames, ignore_index=True)
+
+    # Periods are selected per tag, so a tag a company stopped using years
+    # ago would otherwise contribute stale periods (e.g. FY2010 rows with
+    # NaN everywhere else). Trim each company to a window ending at its
+    # most recent period: `periods` fiscal years (or quarters for 10-Q).
+    span_days = 380 if form == "10-K" else 98
+    window = pd.Timedelta(days=span_days * (periods - 1) + 60)
+    ends = pd.to_datetime(tidy["period_end"])
+    max_end = ends.groupby(tidy["ticker"]).transform("max")
+    return tidy[ends >= max_end - window].reset_index(drop=True)
 
 
 def to_wide(statements: pd.DataFrame) -> pd.DataFrame:

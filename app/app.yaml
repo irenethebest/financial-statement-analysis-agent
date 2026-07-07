@@ -5,10 +5,15 @@ command:
   - --server.port=8000
   - --server.address=0.0.0.0
 
-# Defaults for local `streamlit run app.py`; the bundle overrides these
-# per environment in databricks.yml.
 env:
+  # Injected from the app's bound resources (names defined in databricks.yml):
+  # the bundle's `config:` env block is ignored by current Databricks Apps,
+  # so everything must be declared here.
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql_warehouse
+  - name: LLM_ENDPOINT
+    valueFrom: llm
+  - name: PIPELINE_JOB_ID
+    valueFrom: pipeline
   - name: APP_CATALOG
     value: fs_analysis_agent_dev
-  - name: LLM_ENDPOINT
-    value: databricks-claude-sonnet-4
