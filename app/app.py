@@ -610,6 +610,7 @@ with tab_data:
             # Offer the latest quarter too when a 10-Q is NEWER than the
             # last fiscal year end (we already ingest quarterly data).
             flow_row, flow_segments = wlast, sel_segments
+            flow_is_q = False
             flow_label = (f"{_fy(wlast['period_end'])} (fiscal year ended "
                           f"{wlast['period_end']}, 10-K)")
             qrow = wq.iloc[-1] if len(wq) > 0 else None
@@ -622,6 +623,7 @@ with tab_data:
                     horizontal=True, key="flow_period")
                 if choice.startswith("Latest quarter"):
                     flow_row = qrow
+                    flow_is_q = True
                     flow_segments = []  # segments are parsed from the 10-K
                     flow_label = (f"quarter ended {qrow['period_end']} "
                                   "(10-Q, more recent than the last "
@@ -669,27 +671,54 @@ with tab_data:
                     return "—"
                 return f"{(cur - pre) / abs(pre):+.1%}"
 
+            # Follow the FY / latest-quarter toggle above.
+            if flow_is_q:
+                base = qrow
+                # same quarter last year = 4 discrete quarters back
+                prev_yoy = wq.iloc[-5] if len(wq) >= 5 else None
+                prev_qoq = qprev
+                col_hdr = f"Q ended {qrow['period_end']} ($)"
+            else:
+                base = wlast
+                prev_yoy = wprev
+                prev_qoq = None  # FY view: QoQ uses the two latest quarters
+                col_hdr = f"{_fy(wlast['period_end'])} ($)"
+
             table = []
             for col, name in _IS_ROWS:
-                v = wlast.get(col)
+                v = base.get(col)
                 if v is None or pd.isna(v):
                     continue
+                if flow_is_q:
+                    qoq = _pct(v, prev_qoq.get(col)
+                               if prev_qoq is not None else None)
+                else:
+                    qoq = _pct(qlast.get(col)
+                               if qlast is not None else None,
+                               qprev.get(col)
+                               if qprev is not None else None)
                 table.append({
                     "Line item": name,
-                    f"{_fy(wlast['period_end'])} ($)": _b(v),
-                    "% of revenue": (f"{v / wlast['revenue']:.1%}"
-                                     if pd.notna(wlast.get("revenue"))
-                                     and wlast["revenue"] else "—"),
-                    "YoY %": _pct(v, wprev.get(col)
-                                  if wprev is not None else None),
-                    "QoQ %": _pct(qlast.get(col)
-                                  if qlast is not None else None,
-                                  qprev.get(col)
-                                  if qprev is not None else None),
+                    col_hdr: _b(v),
+                    "% of revenue": (f"{v / base['revenue']:.1%}"
+                                     if pd.notna(base.get("revenue"))
+                                     and base["revenue"] else "—"),
+                    "YoY %": _pct(v, prev_yoy.get(col)
+                                  if prev_yoy is not None else None),
+                    "QoQ %": qoq,
                 })
             st.dataframe(pd.DataFrame(table), use_container_width=True,
                          hide_index=True)
-            if qlast is not None:
+            if flow_is_q:
+                st.caption("Latest-quarter view — YoY compares to the same "
+                           "quarter last year"
+                           + (f" ({prev_yoy['period_end']})"
+                              if prev_yoy is not None else
+                              " (not available: needs 5+ ingested quarters)")
+                           + "; QoQ to the prior quarter"
+                           + (f" ({qprev['period_end']})."
+                              if qprev is not None else "."))
+            elif qlast is not None:
                 st.caption(f"QoQ compares the two most recent discrete "
                            f"quarters ({qprev['period_end'] if qprev is not None else '—'} "
                            f"→ {qlast['period_end']}) from 10-Q filings.")
