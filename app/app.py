@@ -924,9 +924,9 @@ def news_headlines(name: str, n: int = 3) -> list[dict]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def sec_industry_companies(sic: str) -> pd.DataFrame:
+def sec_industry_companies(sic: str) -> tuple[pd.DataFrame, str]:
     """All SEC filers under an exact SIC code (official browse-edgar
-    endpoint, Atom output — keyless). Alphabetical; SEC doesn't rank."""
+    endpoint, Atom output — keyless). Returns (df, error_message)."""
     import html as _html
     import re as _re
 
@@ -938,6 +938,8 @@ def sec_industry_companies(sic: str) -> pd.DataFrame:
                     "count": "100", "output": "atom"},
             headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
             timeout=20)
+        if resp.status_code != 200:
+            return pd.DataFrame(), f"SEC returned HTTP {resp.status_code}"
         rows = []
         for e in _re.findall(r"<entry>(.*?)</entry>", resp.text, _re.S):
             t = _re.search(r"<title>(.*?)</title>", e, _re.S)
@@ -947,9 +949,57 @@ def sec_industry_companies(sic: str) -> pd.DataFrame:
                 name = _re.sub(r"\s*\(\d{7,10}\)\s*$", "", name)
                 rows.append({"company": name,
                              "cik": int(c.group(1)) if c else None})
-        return pd.DataFrame(rows).drop_duplicates(subset=["company"])
+        if not rows:
+            return pd.DataFrame(), "no entries parsed from SEC response"
+        return (pd.DataFrame(rows).drop_duplicates(subset=["company"]), "")
+    except Exception as exc:
+        return pd.DataFrame(), f"{type(exc).__name__}: {exc}"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cik_ticker_map() -> dict[int, str]:
+    import requests
+    try:
+        data = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
+            timeout=20).json()
+        return {int(e["cik_str"]): e["ticker"] for e in data.values()}
     except Exception:
-        return pd.DataFrame()
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def industry_top5(sic: str) -> tuple[pd.DataFrame, int, str]:
+    """Top 5 SEC filers in an industry by market cap.
+    SEC roster -> CIK->ticker map -> Yahoo market caps in parallel.
+    Returns (top5_df, total_filers, error_message)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    ind, err = sec_industry_companies(sic)
+    if ind.empty:
+        return pd.DataFrame(), 0, err
+    m = cik_ticker_map()
+    ind = ind.copy()
+    ind["ticker"] = ind["cik"].map(m)
+    listed = ind.dropna(subset=["ticker"]).head(120)
+    if listed.empty:
+        return pd.DataFrame(), len(ind), "no listed tickers in roster"
+
+    def _cap(t):
+        try:
+            import yfinance as yf
+            return yf.Ticker(t).fast_info["marketCap"]
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        listed["market_cap"] = list(ex.map(_cap, listed["ticker"]))
+    top = (listed.dropna(subset=["market_cap"])
+           .sort_values("market_cap", ascending=False).head(5))
+    if top.empty:
+        return pd.DataFrame(), len(ind), "market caps unavailable (Yahoo)"
+    return top, len(ind), ""
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1095,21 +1145,29 @@ with tab_overview:
             if not cand.empty:
                 peer_prof, match_label = cand, label
                 break
-        # Actual industry roster from SEC (every filer with this SIC).
+        # Industry leaders: SEC roster ranked by Yahoo market cap.
         if len(sic) >= 4:
-            ind = sec_industry_companies(sic)
-            if not ind.empty:
+            with st.spinner("Ranking industry peers by size (first load "
+                            "per industry takes ~30s, then cached)…"):
+                top5, total, err = industry_top5(sic)
+            if not top5.empty:
                 known_ciks = set(companies_o["cik"].astype(int))
-                ind["In catalog"] = ind["cik"].map(
-                    lambda c: "✅" if c in known_ciks else "")
-                st.markdown(f"**Companies in this industry** — "
+                disp = pd.DataFrame({
+                    "Company": top5["company"].values,
+                    "Ticker": top5["ticker"].values,
+                    "Market cap": top5["market_cap"].map(_b).values,
+                    "In catalog": top5["cik"].map(
+                        lambda c: "✅" if c in known_ciks else "").values,
+                })
+                st.markdown(f"**Top 5 in this industry by market cap** — "
                             f"SIC {sic}, {_p('sic_description') or ''} "
-                            f"({len(ind)} SEC filers)")
-                st.dataframe(ind[["company", "In catalog"]].head(15),
-                             use_container_width=True, hide_index=True)
-                st.caption("Alphabetical (SEC doesn't rank by size). Ask "
-                           "the analyst to ingest any of them for a full "
-                           "comparison below.")
+                            f"({total} SEC filers total)")
+                st.dataframe(disp, use_container_width=True,
+                             hide_index=True)
+                st.caption("Sizes from Yahoo Finance. Ask the analyst to "
+                           "ingest any of them for the comparison below.")
+            else:
+                st.caption(f"Industry list unavailable — {err}")
 
         if peer_prof.empty:
             st.caption("No ingested peers share this company's SIC sector "
