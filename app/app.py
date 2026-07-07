@@ -109,6 +109,21 @@ def _ingest_company(ticker: str) -> str:
     if not ticker or not ticker.isalnum():
         return json.dumps({"error": f"Invalid ticker: {ticker!r}"})
 
+    # Hard guard: if the company is already ingested, never re-trigger —
+    # tell the agent to analyze instead (models don't always check first).
+    try:
+        n = query(f"SELECT count(*) AS n FROM {CATALOG}.bronze.companies "
+                  f"WHERE ticker = '{ticker}'").iloc[0, 0]
+        if int(n) > 0:
+            return json.dumps({
+                "status": "already_available",
+                "note": f"{ticker} is already ingested. Do NOT ingest again "
+                        "— call get_ratios / get_anomalies / get_statements "
+                        "now and answer the user's question.",
+            })
+    except Exception:
+        pass  # if the check fails, fall through to normal flow
+
     # Validate against SEC's official ticker list before burning a job run.
     try:
         resp = requests.get(
@@ -226,11 +241,16 @@ with tab_agent:
         with st.chat_message("assistant"):
             status = st.status("Analyzing…", expanded=True)
             try:
+                # Pass recent chat history so the agent remembers e.g. that
+                # it already started an ingestion earlier in the session.
+                hist = [{"role": r, "content": t}
+                        for r, t in st.session_state.chat[:-1][-6:]]
                 answer, trail = agent_core.run_agent(
                     client=_llm_client(),
                     model=LLM,
                     user_message=prompt,
                     execute_tool=execute_tool,
+                    history=hist,
                     on_event=lambda msg: status.write(msg),
                 )
                 status.update(label="Done — audit trail above", state="complete",
