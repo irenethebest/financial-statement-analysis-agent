@@ -32,6 +32,35 @@ def is_fake_tool_text(text: str) -> bool:
     """True if a message narrates tool calls instead of making them."""
     return bool(_FAKE_TOOL_CALL.search(text or ""))
 
+
+def content_to_text(content) -> str:
+    """Normalize message content to a plain string.
+
+    Reasoning models (e.g. gpt-oss) return content as a list of typed
+    parts rather than a string; keep only the text parts.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                if p.get("type") in (None, "text", "output_text"):
+                    t = p.get("text")
+                    if isinstance(t, str):
+                        parts.append(t)
+            else:  # SDK objects
+                if getattr(p, "type", "text") in ("text", "output_text"):
+                    t = getattr(p, "text", None)
+                    if isinstance(t, str):
+                        parts.append(t)
+        return "\n".join(x for x in parts if x).strip()
+    return str(content)
+
 SYSTEM_PROMPT = """\
 You are a financial statement analyst. You explain SEC filings to smart
 people who are NOT accountants.
@@ -219,7 +248,7 @@ def run_agent(
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
-            content = msg.content or ""
+            content = content_to_text(msg.content)
             if _FAKE_TOOL_CALL.search(content) and _turn < max_turns - 1:
                 # The model narrated tool calls instead of making them.
                 notify("Model wrote tool syntax as text — nudging it to "
@@ -240,7 +269,7 @@ def run_agent(
 
         messages.append({
             "role": "assistant",
-            "content": msg.content,
+            "content": content_to_text(msg.content),
             "tool_calls": [
                 {
                     "id": tc.id,
