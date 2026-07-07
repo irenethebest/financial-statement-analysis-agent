@@ -606,24 +606,45 @@ with tab_data:
             st.info("No statement data.")
         else:
             st.subheader("Income statement flow")
-            st.caption(f"{sel} — {_fy(wlast['period_end'])} "
-                       f"(fiscal year ended {wlast['period_end']}); "
-                       "labels show $ and % of revenue"
-                       + (" · left column = revenue by source (parsed from "
-                          "the 10-K's inline XBRL)" if sel_segments else ""))
-            fig = build_income_flow(wlast, sel_segments)
+
+            # Offer the latest quarter too when a 10-Q is NEWER than the
+            # last fiscal year end (we already ingest quarterly data).
+            flow_row, flow_segments = wlast, sel_segments
+            flow_label = (f"{_fy(wlast['period_end'])} (fiscal year ended "
+                          f"{wlast['period_end']}, 10-K)")
+            qrow = wq.iloc[-1] if len(wq) > 0 else None
+            if (qrow is not None
+                    and str(qrow["period_end"]) > str(wlast["period_end"])):
+                choice = st.radio(
+                    "Period",
+                    [f"Full year — {_fy(wlast['period_end'])}",
+                     f"Latest quarter — ended {qrow['period_end']}"],
+                    horizontal=True, key="flow_period")
+                if choice.startswith("Latest quarter"):
+                    flow_row = qrow
+                    flow_segments = []  # segments are parsed from the 10-K
+                    flow_label = (f"quarter ended {qrow['period_end']} "
+                                  "(10-Q, more recent than the last "
+                                  "fiscal year)")
+
+            st.caption(f"{sel} — {flow_label}; labels show $ and % of "
+                       "revenue"
+                       + (" · left column = revenue by source (parsed "
+                          "from the 10-K's inline XBRL)"
+                          if flow_segments else ""))
+            fig = build_income_flow(flow_row, flow_segments)
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                wf = build_income_waterfall(wlast)
+                wf = build_income_waterfall(flow_row)
                 if wf is not None:
-                    st.info("Sankey needs positive flows — this company had "
+                    st.info("Sankey needs positive flows — this period had "
                             "losses or missing items, showing a waterfall "
                             "instead (negatives welcome).")
                     st.plotly_chart(wf, use_container_width=True)
                 else:
                     st.info("Not enough extracted line items to draw the "
-                            "income statement flow for this company.")
+                            "income statement flow for this period.")
 
             # ---- Common-size / growth analysis ----
             st.subheader("Income statement analysis")
@@ -1164,24 +1185,13 @@ with tab_overview:
                        "or rate limits).")
 
     st.divider()
-    st.subheader("Peers in your catalog")
+    st.subheader("Market competitors")
     if prof is not None and not profiles.empty:
-        # Match at the most specific SIC level that yields peers:
-        # 3-digit industry -> 2-digit group -> 1-digit division.
         sic = str(prof.get("sic") or "")
-        peer_prof = pd.DataFrame()
-        match_label = None
-        for depth, label in [(3, "same industry (3-digit SIC)"),
-                             (2, "same industry group (2-digit SIC)"),
-                             (1, "same sector division (1-digit SIC)")]:
-            if len(sic) < depth:
-                continue
-            cand = profiles[
-                (profiles["sic"].str[:depth] == sic[:depth])
-                & (profiles["ticker"] != sel_o)]
-            if not cand.empty:
-                peer_prof, match_label = cand, label
-                break
+        # Ingested peers: exact industry only (full 4-digit SIC match).
+        peer_prof = (profiles[(profiles["sic"] == sic)
+                              & (profiles["ticker"] != sel_o)]
+                     if sic else pd.DataFrame())
         # Industry leaders, ranked by size (Yahoo primary, SEC fallback).
         with st.spinner("Finding the industry's largest companies "
                         "(first load per industry is slow, then cached)…"):
@@ -1202,12 +1212,12 @@ with tab_overview:
             st.caption(f"Industry list unavailable — {err}")
 
         if peer_prof.empty:
-            st.caption("No ingested peers share this company's SIC sector "
-                       "yet — ask the analyst to ingest a competitor from "
-                       "the list above.")
+            st.caption(f"No ingested company shares this exact industry "
+                       f"(SIC {sic}) yet — ask the analyst to ingest a "
+                       "competitor from the list above.")
         else:
             st.markdown(f"**Peer comparison from your data** — "
-                        f"matched by {match_label}.")
+                        f"same industry (SIC {sic}).")
             latest_r = (ratios_o.sort_values("period_end")
                         .groupby("ticker").tail(1)
                         .set_index("ticker"))
