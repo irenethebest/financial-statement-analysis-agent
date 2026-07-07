@@ -48,28 +48,50 @@ NAVY, ACCENT, BAD, WARN = "#0f2742", "#2f80ed", "#d2483f", "#e0883a"
 # Databricks connections (cached per session)
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
-def _sql_conn():
-    from databricks import sql
-    from databricks.sdk.core import Config
-
-    cfg = Config()  # app's OAuth service principal
-    return sql.connect(
-        server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
-        credentials_provider=lambda: cfg.authenticate,
-    )
+def _ws():
+    from databricks.sdk import WorkspaceClient
+    return WorkspaceClient()  # auto-auths as the app's service principal
 
 
 @st.cache_resource(show_spinner=False)
 def _llm_client():
-    from databricks.sdk import WorkspaceClient
-    return WorkspaceClient().serving_endpoints.get_open_ai_client()
+    return _ws().serving_endpoints.get_open_ai_client()
 
 
-def query(sql_text: str) -> pd.DataFrame:
-    with _sql_conn().cursor() as cur:
-        cur.execute(sql_text)
-        return cur.fetchall_arrow().to_pandas()
+def query(sql_text: str, timeout_s: int = 150) -> pd.DataFrame:
+    """Run SQL on the bound warehouse via the Statement Execution API.
+
+    REST-based (no connector handshake), explicit timeout, and surfaces
+    server-side errors (e.g. PERMISSION_DENIED) as readable exceptions.
+    """
+    import time
+
+    from databricks.sdk.service.sql import StatementState
+
+    w = _ws()
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=WAREHOUSE_ID,
+        statement=sql_text,
+        wait_timeout="30s",
+    )
+    deadline = time.time() + timeout_s
+    while (resp.status.state in (StatementState.PENDING, StatementState.RUNNING)
+           and time.time() < deadline):
+        time.sleep(2)
+        resp = w.statement_execution.get_statement(resp.statement_id)
+
+    if resp.status.state != StatementState.SUCCEEDED:
+        err = resp.status.error.message if resp.status.error else resp.status.state
+        raise RuntimeError(f"SQL failed ({resp.status.state}): {err}")
+
+    cols = [c.name for c in resp.manifest.schema.columns]
+    df = pd.DataFrame(resp.result.data_array or [], columns=cols)
+    # The API returns strings; restore numerics where the whole column casts.
+    for c in df.columns:
+        conv = pd.to_numeric(df[c], errors="coerce")
+        if df[c].notna().any() and (conv.isna() == df[c].isna()).all():
+            df[c] = conv
+    return df
 
 
 def execute_tool(name: str, args: dict) -> str:
