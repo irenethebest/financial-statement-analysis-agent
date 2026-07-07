@@ -127,16 +127,20 @@ with tab_agent:
     if "chat" not in st.session_state:
         st.session_state.chat = []  # [(role, text)]
 
+    def md(text: str) -> str:
+        # Streamlit markdown treats $...$ as LaTeX; escape dollar amounts.
+        return text.replace("$", r"\$")
+
     for role, text in st.session_state.chat:
         with st.chat_message(role):
-            st.markdown(text)
+            st.markdown(md(text))
 
     prompt = st.chat_input(
         "e.g. Analyze AAPL — is its profit backed by real cash?")
     if prompt:
         st.session_state.chat.append(("user", prompt))
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(md(prompt))
         with st.chat_message("assistant"):
             status = st.status("Analyzing…", expanded=True)
             try:
@@ -149,7 +153,7 @@ with tab_agent:
                 )
                 status.update(label="Done — audit trail above", state="complete",
                               expanded=False)
-                st.markdown(answer)
+                st.markdown(md(answer))
                 st.session_state.chat.append(("assistant", answer))
             except Exception as exc:
                 status.update(label="Failed", state="error")
