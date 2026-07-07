@@ -924,6 +924,35 @@ def news_headlines(name: str, n: int = 3) -> list[dict]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def sec_industry_companies(sic: str) -> pd.DataFrame:
+    """All SEC filers under an exact SIC code (official browse-edgar
+    endpoint, Atom output — keyless). Alphabetical; SEC doesn't rank."""
+    import html as _html
+    import re as _re
+
+    import requests
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/cgi-bin/browse-edgar",
+            params={"action": "getcompany", "SIC": sic, "type": "10-K",
+                    "count": "100", "output": "atom"},
+            headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
+            timeout=20)
+        rows = []
+        for e in _re.findall(r"<entry>(.*?)</entry>", resp.text, _re.S):
+            t = _re.search(r"<title>(.*?)</title>", e, _re.S)
+            c = _re.search(r"CIK=(\d{4,10})", e)
+            if t:
+                name = _html.unescape(t.group(1)).strip()
+                name = _re.sub(r"\s*\(\d{7,10}\)\s*$", "", name)
+                rows.append({"company": name,
+                             "cik": int(c.group(1)) if c else None})
+        return pd.DataFrame(rows).drop_duplicates(subset=["company"])
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def yf_holders(ticker: str) -> pd.DataFrame:
     try:
         import yfinance as yf
@@ -1066,11 +1095,29 @@ with tab_overview:
             if not cand.empty:
                 peer_prof, match_label = cand, label
                 break
+        # Actual industry roster from SEC (every filer with this SIC).
+        if len(sic) >= 4:
+            ind = sec_industry_companies(sic)
+            if not ind.empty:
+                known_ciks = set(companies_o["cik"].astype(int))
+                ind["In catalog"] = ind["cik"].map(
+                    lambda c: "✅" if c in known_ciks else "")
+                st.markdown(f"**Companies in this industry** — "
+                            f"SIC {sic}, {_p('sic_description') or ''} "
+                            f"({len(ind)} SEC filers)")
+                st.dataframe(ind[["company", "In catalog"]].head(15),
+                             use_container_width=True, hide_index=True)
+                st.caption("Alphabetical (SEC doesn't rank by size). Ask "
+                           "the analyst to ingest any of them for a full "
+                           "comparison below.")
+
         if peer_prof.empty:
             st.caption("No ingested peers share this company's SIC sector "
-                       "yet — ask the analyst to ingest a competitor.")
+                       "yet — ask the analyst to ingest a competitor from "
+                       "the list above.")
         else:
-            st.caption(f"Matched by {match_label}.")
+            st.markdown(f"**Peer comparison from your data** — "
+                        f"matched by {match_label}.")
             latest_r = (ratios_o.sort_values("period_end")
                         .groupby("ticker").tail(1)
                         .set_index("ticker"))
