@@ -143,20 +143,9 @@ resources:
       name: fsa-agent-${var.env}
       description: SEC filing analysis — Claude agent over UC-governed tools
       source_code_path: ./app
-      config:
-        command:
-          - streamlit
-          - run
-          - app.py
-          - --server.port=8000
-          - --server.address=0.0.0.0
-        env:
-          - name: DATABRICKS_WAREHOUSE_ID
-            value: ${var.warehouse_id}
-          - name: APP_CATALOG
-            value: ${var.catalog}
-          - name: LLM_ENDPOINT
-            value: ${var.llm_endpoint}
+      # NOTE: command + env live in app/app.yaml (current Databricks Apps
+      # ignore a `config:` block here). Env values are injected from the
+      # resource bindings below via `valueFrom`.
       resources:
         - name: sql_warehouse
           sql_warehouse:
