@@ -938,6 +938,15 @@ def sec_industry_companies(sic: str) -> tuple[pd.DataFrame, str]:
                     "count": "100", "output": "atom"},
             headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
             timeout=20)
+        if resp.status_code in (429, 503):  # SEC rate/robot gate — retry
+            import time as _time
+            for backoff in (1, 3):
+                _time.sleep(backoff)
+                resp = requests.get(resp.url, headers={
+                    "User-Agent": f"FSA portfolio app {UA_EMAIL}"},
+                    timeout=20)
+                if resp.status_code == 200:
+                    break
         if resp.status_code != 200:
             return pd.DataFrame(), f"SEC returned HTTP {resp.status_code}"
         rows = []
@@ -969,37 +978,65 @@ def cik_ticker_map() -> dict[int, str]:
         return {}
 
 
+def _yf_cap(t):
+    try:
+        import yfinance as yf
+        return yf.Ticker(t).fast_info["marketCap"]
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
-def industry_top5(sic: str) -> tuple[pd.DataFrame, int, str]:
-    """Top 5 SEC filers in an industry by market cap.
-    SEC roster -> CIK->ticker map -> Yahoo market caps in parallel.
-    Returns (top5_df, total_filers, error_message)."""
+def industry_top5(sic: str, ticker: str) -> tuple[pd.DataFrame, str, str]:
+    """Top 5 companies in the selected company's industry, ranked by size.
+
+    Route 1 (primary): Yahoo's industry classification — one call returns
+    the ranked top-companies list directly.
+    Route 2 (fallback): SEC browse-by-SIC roster (cloud IPs often get 503
+    there) -> CIK->ticker -> parallel Yahoo market caps.
+    Returns (df[company,ticker,market_cap], source_note, error)."""
     from concurrent.futures import ThreadPoolExecutor
+
+    errs = []
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info or {}
+        key, ind_name = info.get("industryKey"), info.get("industry")
+        if key:
+            tc = yf.Industry(key).top_companies
+            if tc is not None and not tc.empty:
+                tc = tc.reset_index().head(5)
+                sym_col = ("symbol" if "symbol" in tc.columns
+                           else tc.columns[0])
+                name_col = "name" if "name" in tc.columns else tc.columns[1]
+                with ThreadPoolExecutor(max_workers=5) as ex:
+                    caps = list(ex.map(_yf_cap, tc[sym_col]))
+                df = pd.DataFrame({"company": tc[name_col],
+                                   "ticker": tc[sym_col],
+                                   "market_cap": caps})
+                return df, f"Yahoo industry: {ind_name}", ""
+        errs.append("no Yahoo industry mapping")
+    except Exception as exc:
+        errs.append(f"Yahoo route: {type(exc).__name__}")
 
     ind, err = sec_industry_companies(sic)
     if ind.empty:
-        return pd.DataFrame(), 0, err
+        errs.append(f"SEC route: {err}")
+        return pd.DataFrame(), "", "; ".join(errs)
     m = cik_ticker_map()
     ind = ind.copy()
     ind["ticker"] = ind["cik"].map(m)
     listed = ind.dropna(subset=["ticker"]).head(120)
     if listed.empty:
-        return pd.DataFrame(), len(ind), "no listed tickers in roster"
-
-    def _cap(t):
-        try:
-            import yfinance as yf
-            return yf.Ticker(t).fast_info["marketCap"]
-        except Exception:
-            return None
-
+        return pd.DataFrame(), "", "no listed tickers in SEC roster"
     with ThreadPoolExecutor(max_workers=8) as ex:
-        listed["market_cap"] = list(ex.map(_cap, listed["ticker"]))
+        listed["market_cap"] = list(ex.map(_yf_cap, listed["ticker"]))
     top = (listed.dropna(subset=["market_cap"])
            .sort_values("market_cap", ascending=False).head(5))
     if top.empty:
-        return pd.DataFrame(), len(ind), "market caps unavailable (Yahoo)"
-    return top, len(ind), ""
+        return pd.DataFrame(), "", "market caps unavailable (Yahoo)"
+    return (top[["company", "ticker", "market_cap"]],
+            f"SIC {sic} — {len(ind)} SEC filers", "")
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1145,29 +1182,24 @@ with tab_overview:
             if not cand.empty:
                 peer_prof, match_label = cand, label
                 break
-        # Industry leaders: SEC roster ranked by Yahoo market cap.
-        if len(sic) >= 4:
-            with st.spinner("Ranking industry peers by size (first load "
-                            "per industry takes ~30s, then cached)…"):
-                top5, total, err = industry_top5(sic)
-            if not top5.empty:
-                known_ciks = set(companies_o["cik"].astype(int))
-                disp = pd.DataFrame({
-                    "Company": top5["company"].values,
-                    "Ticker": top5["ticker"].values,
-                    "Market cap": top5["market_cap"].map(_b).values,
-                    "In catalog": top5["cik"].map(
-                        lambda c: "✅" if c in known_ciks else "").values,
-                })
-                st.markdown(f"**Top 5 in this industry by market cap** — "
-                            f"SIC {sic}, {_p('sic_description') or ''} "
-                            f"({total} SEC filers total)")
-                st.dataframe(disp, use_container_width=True,
-                             hide_index=True)
-                st.caption("Sizes from Yahoo Finance. Ask the analyst to "
-                           "ingest any of them for the comparison below.")
-            else:
-                st.caption(f"Industry list unavailable — {err}")
+        # Industry leaders, ranked by size (Yahoo primary, SEC fallback).
+        with st.spinner("Finding the industry's largest companies "
+                        "(first load per industry is slow, then cached)…"):
+            top5, note, err = industry_top5(sic, sel_o)
+        if not top5.empty:
+            disp = pd.DataFrame({
+                "Company": top5["company"].values,
+                "Ticker": top5["ticker"].values,
+                "Market cap": top5["market_cap"].map(_b).values,
+                "In catalog": [("✅" if t in tickers_o else "")
+                               for t in top5["ticker"]],
+            })
+            st.markdown(f"**Top 5 in this industry by size** — {note}")
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            st.caption("Sizes from Yahoo Finance. Ask the analyst to "
+                       "ingest any of them for the comparison below.")
+        else:
+            st.caption(f"Industry list unavailable — {err}")
 
         if peer_prof.empty:
             st.caption("No ingested peers share this company's SIC sector "
