@@ -242,9 +242,13 @@ with tab_agent:
             status = st.status("Analyzing…", expanded=True)
             try:
                 # Pass recent chat history so the agent remembers e.g. that
-                # it already started an ingestion earlier in the session.
+                # it already started an ingestion earlier in the session —
+                # but drop any earlier hallucinated tool transcripts so the
+                # model doesn't learn the bad pattern from its own output.
                 hist = [{"role": r, "content": t}
-                        for r, t in st.session_state.chat[:-1][-6:]]
+                        for r, t in st.session_state.chat[:-1][-6:]
+                        if not (r == "assistant"
+                                and agent_core.is_fake_tool_text(t))]
                 answer, trail = agent_core.run_agent(
                     client=_llm_client(),
                     model=LLM,

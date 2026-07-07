@@ -16,11 +16,19 @@ import json
 import re
 from typing import Callable
 
-# Llama-family models sometimes write "[get_ratios(...)]" as prose instead
-# of emitting a native tool call. Detect it so the loop can correct course.
+# Some open models write tool calls as prose — "[get_ratios(...)]", bare
+# "get_ratios(p_ticker=X)", or leaked chat-template tokens like "/ipython" —
+# instead of emitting native tool calls. Detect it so the loop can correct
+# course rather than return a hallucinated transcript to the user.
 _FAKE_TOOL_CALL = re.compile(
-    r"\[\s*(?:get_statements|get_ratios|get_anomalies|list_companies"
-    r"|ingest_company|get_pipeline_status)\s*\(")
+    r"(?:get_statements|get_ratios|get_anomalies|list_companies"
+    r"|ingest_company|get_pipeline_status)\s*\("
+    r"|/ipython|<\|python_tag\|>|<\|eom\|>")
+
+
+def is_fake_tool_text(text: str) -> bool:
+    """True if a message narrates tool calls instead of making them."""
+    return bool(_FAKE_TOOL_CALL.search(text or ""))
 
 SYSTEM_PROMPT = """\
 You are a financial statement analyst. You explain SEC filings to smart
@@ -203,7 +211,8 @@ def run_agent(
             messages=messages,
             tools=TOOL_SPECS,
             max_tokens=4000,
-            timeout=120,  # never hang silently on a single LLM call
+            temperature=0.2,  # analysis, not creativity — stay on rails
+            timeout=120,      # never hang silently on a single LLM call
         )
         msg = resp.choices[0].message
 
