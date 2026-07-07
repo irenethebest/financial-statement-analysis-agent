@@ -19,9 +19,12 @@ dbutils.widgets.text("user_agent_email", "irenejinheechoi@gmail.com",
                      "Contact email for SEC User-Agent header")
 dbutils.widgets.text("owner_user", "jchoi867@gatech.edu",
                      "User to grant catalog access (CI runs as a service principal)")
+dbutils.widgets.text("include_existing", "true",
+                     "Also re-ingest tickers already in bronze (merge semantics)")
 
 CATALOG = dbutils.widgets.get("catalog")
 OWNER_USER = dbutils.widgets.get("owner_user")
+INCLUDE_EXISTING = dbutils.widgets.get("include_existing").lower() == "true"
 SCHEMA = "bronze"
 TICKERS = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",") if t.strip()]
 UA_EMAIL = dbutils.widgets.get("user_agent_email")
@@ -70,12 +73,32 @@ if OWNER_USER:
 
 import pandas as pd
 
+# Merge semantics: the widget lists tickers to ADD; union with what's
+# already ingested so a full overwrite refreshes everyone. This is what
+# lets the agent's ingest_company tool add one ticker without dropping
+# the rest.
+if INCLUDE_EXISTING:
+    try:
+        existing = [r.ticker for r in
+                    spark.table("companies").select("ticker").collect()]
+        TICKERS = sorted(set(TICKERS) | set(existing))
+        print(f"Union with {len(existing)} existing -> {TICKERS}")
+    except Exception:
+        print("No existing companies table — first run")
+
 fetched_at = datetime.now(timezone.utc).isoformat()
 companies, fact_rows, filing_rows = [], [], []
 
+failed = []
 for ticker in TICKERS:
     print(f"Fetching {ticker} ...")
-    bundle = edgar.fetch_all(ticker, UA_EMAIL)
+    try:
+        bundle = edgar.fetch_all(ticker, UA_EMAIL)
+    except Exception as exc:
+        # One bad ticker must not sink the whole (merged) run.
+        print(f"  SKIPPED {ticker}: {exc}")
+        failed.append(ticker)
+        continue
     facts = edgar.facts_to_records(ticker, bundle["company_facts"])
     fact_rows.extend(facts)
 
@@ -128,3 +151,5 @@ spark.createDataFrame(pd.DataFrame(filing_rows)) \
 print("Bronze tables written:")
 for t in ("companies", "xbrl_facts", "filings"):
     print(f"  {CATALOG}.{SCHEMA}.{t}: {spark.table(t).count():,} rows")
+if failed:
+    print(f"Skipped tickers (not found / fetch error): {failed}")

@@ -45,6 +45,10 @@ On Free Edition (and as cost discipline anywhere), an always-on Model Serving en
 
 The agent is also **model-agnostic by design**: Free Edition workspaces sit in a trust tier that rate-limits premium hosted models (Claude, GPT) to zero, so the default endpoint is `databricks-llama-4-maverick`; on a paid workspace, setting the `llm_endpoint` bundle variable to `databricks-claude-sonnet-5` swaps the model with no code change.
 
+## On-demand ingestion (the agent can act)
+
+Ask about a company that isn't in the data yet and the agent doesn't guess — it validates the ticker against SEC's official company list, then calls its `ingest_company` tool, which triggers the same governed Lakeflow pipeline via the Jobs API (the app's service principal holds `CAN_MANAGE_RUN` through a bundle resource binding). Ingestion uses merge semantics: new tickers are unioned with everything already in bronze, so nothing is dropped. A few minutes later the company is queryable end to end — bronze facts through gold ratios — and the agent's `get_pipeline_status` tool reports progress in the meantime. The LLM never touches data directly; it can only *request* that the governed pipeline run.
+
 ## Red-flag rules (`fsa/anomalies.py`)
 
 Receivables outrunning revenue (aggressive revenue recognition), profit not backed by operating cash flow (accruals), inventory building faster than COGS, margin compression during growth, current ratio < 1, leverage spikes, negative equity, revenue decline. Each flag carries severity, the metric values it fired on, and a plain-English explanation — the agent may only report flags from this list.

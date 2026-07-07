@@ -37,6 +37,8 @@ CATALOG = os.getenv("APP_CATALOG", "fs_analysis_agent_dev")
 FQ = f"{CATALOG}.gold"  # tool functions live in the gold (serving) schema
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 LLM = os.getenv("LLM_ENDPOINT", "databricks-llama-4-maverick")
+PIPELINE_JOB_ID = os.getenv("PIPELINE_JOB_ID")  # for the ingest_company tool
+UA_EMAIL = os.getenv("SEC_USER_AGENT_EMAIL", "irenejinheechoi@gmail.com")
 
 st.set_page_config(page_title="Financial Statement Analysis Agent",
                    page_icon="📄", layout="wide")
@@ -94,7 +96,87 @@ def query(sql_text: str, timeout_s: int = 150) -> pd.DataFrame:
     return df
 
 
+def _ingest_company(ticker: str) -> str:
+    """Agent action tool: validate the ticker against SEC's company list,
+    then trigger the governed pipeline job with it (merge semantics)."""
+    import json
+
+    import requests
+
+    if not PIPELINE_JOB_ID:
+        return json.dumps({"error": "Ingestion is not configured "
+                                    "(PIPELINE_JOB_ID missing)."})
+    if not ticker or not ticker.isalnum():
+        return json.dumps({"error": f"Invalid ticker: {ticker!r}"})
+
+    # Validate against SEC's official ticker list before burning a job run.
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": f"FSA agent {UA_EMAIL}"}, timeout=20)
+        known = {e["ticker"].upper(): e["title"] for e in resp.json().values()}
+        if ticker not in known:
+            return json.dumps({"error": f"{ticker} is not an SEC-registered "
+                                        "ticker. Ask the user to verify it."})
+        title = known[ticker]
+    except Exception:
+        title = None  # validation is best-effort; proceed
+
+    w = _ws()
+    # Don't stack runs — if the pipeline is already running, report that.
+    active = list(w.jobs.list_runs(job_id=int(PIPELINE_JOB_ID),
+                                   active_only=True, limit=1))
+    if active:
+        return json.dumps({"status": "already_running",
+                           "note": "The pipeline is already running; new "
+                                   "tickers can be requested once it finishes."})
+
+    run = w.jobs.run_now(job_id=int(PIPELINE_JOB_ID),
+                         notebook_params={"tickers": ticker})
+    return json.dumps({
+        "status": "started",
+        "ticker": ticker,
+        "company": title,
+        "run_id": run.run_id,
+        "note": "Governed ingestion started (EDGAR -> bronze -> silver -> "
+                "gold). Typically ready in a few minutes; the user should "
+                "ask about this company again then.",
+    })
+
+
+def _pipeline_status() -> str:
+    import json
+
+    if not PIPELINE_JOB_ID:
+        return json.dumps({"error": "PIPELINE_JOB_ID missing."})
+    w = _ws()
+    runs = list(w.jobs.list_runs(job_id=int(PIPELINE_JOB_ID), limit=1))
+    if not runs:
+        return json.dumps({"status": "never_run"})
+    r = runs[0]
+    state = r.state.life_cycle_state.value if r.state else "UNKNOWN"
+    result = (r.state.result_state.value
+              if r.state and r.state.result_state else None)
+    done = state in ("TERMINATED", "INTERNAL_ERROR")
+    return json.dumps({
+        "running": not done,
+        "life_cycle_state": state,
+        "result_state": result,
+        "note": ("Finished — newly ingested companies are queryable now."
+                 if done and result == "SUCCESS" else
+                 "Still running — data not ready yet." if not done else
+                 "Last run did not succeed."),
+    })
+
+
 def execute_tool(name: str, args: dict) -> str:
+    if name == "ingest_company":
+        # Refresh the company list cache afterwards so the UI catches up.
+        load_overview.clear()
+        return _ingest_company(str(args.get("p_ticker", "")).upper().strip())
+    if name == "get_pipeline_status":
+        load_overview.clear()
+        return _pipeline_status()
     df = query(agent_core.build_tool_sql(FQ, name, args))
     val = df.iloc[0, 0]
     return val if val is not None else "[]"

@@ -13,5 +13,7 @@ env:
     valueFrom: sql_warehouse
   - name: LLM_ENDPOINT
     valueFrom: llm
+  - name: PIPELINE_JOB_ID
+    valueFrom: pipeline
   - name: APP_CATALOG
     value: fs_analysis_agent_dev

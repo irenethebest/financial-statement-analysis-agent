@@ -120,7 +120,11 @@ def main() -> None:
     ok("DROP TABLE" in sql and "''" in sql, "quote escaping on tool args")
     names = {t["function"]["name"] for t in TOOL_SPECS}
     ok(names == {"list_companies", "get_statements", "get_ratios",
-                 "get_anomalies"}, "tool specs match UC functions")
+                 "get_anomalies", "ingest_company", "get_pipeline_status"},
+       "tool specs complete")
+    from fsa.agent_core import ACTION_TOOLS, _PARAM_ORDER
+    ok(set(_PARAM_ORDER) | ACTION_TOOLS == names,
+       "every tool is either SQL-backed or an action tool")
 
     print(f"\nAll {checks} checks passed.")
 

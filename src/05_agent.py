@@ -63,6 +63,10 @@ client = WorkspaceClient().serving_endpoints.get_open_ai_client()
 
 def execute_tool(name: str, args: dict) -> str:
     """Run a UC function via Spark SQL and hand the JSON back to the LLM."""
+    if name in agent_core.ACTION_TOOLS:
+        return ('{"error": "On-demand ingestion is wired up in the app '
+                '(Jobs API binding); in notebook mode, run the fsa_pipeline '
+                'job with the new ticker instead."}')
     sql = agent_core.build_tool_sql(FQ, name, args)
     return spark.sql(sql).first()["result"] or "[]"
 
