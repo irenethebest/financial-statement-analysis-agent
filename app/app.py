@@ -526,10 +526,22 @@ with tab_data:
     sel = st.selectbox("Company", tickers, index=default_idx,
                        help="Defaults to the company you last asked the "
                             "analyst about")
-    r = ratios[ratios["ticker"] == sel].sort_values("period_end").copy()
-    a = anomalies[anomalies["ticker"] == sel].copy()
-    w = wides[wides["ticker"] == sel].sort_values("period_end").copy()
-    wq = (wides_q[wides_q["ticker"] == sel].sort_values("period_end").copy()
+    def _recent(df, years=5.2):
+        """Defense-in-depth: keep only periods within `years` of the
+        company's latest period (stale tag periods pollute the x-axis)."""
+        if df.empty or "period_end" not in df.columns:
+            return df
+        ends = pd.to_datetime(df["period_end"])
+        return df[ends >= ends.max() - pd.Timedelta(days=int(years * 365))]
+
+    r = _recent(ratios[ratios["ticker"] == sel]) \
+        .sort_values("period_end").copy()
+    a = anomalies[anomalies["ticker"] == sel]
+    a = a[a["period_end"].isin(set(r["period_end"]))].copy()
+    w = _recent(wides[wides["ticker"] == sel]) \
+        .sort_values("period_end").copy()
+    wq = (_recent(wides_q[wides_q["ticker"] == sel], years=2.3)
+          .sort_values("period_end").copy()
           if not wides_q.empty else pd.DataFrame())
     sel_segments = (
         [{"label": row["label"], "value": row["value"]}
@@ -738,28 +750,31 @@ with tab_data:
     # ---- Red flags ----
     with sub_flags:
         if a.empty:
-            st.success("No anomaly rules fired for this company.")
+            st.success("No anomaly rules fired for this company "
+                       "(last 5 fiscal years).")
         else:
-            sev_score = {"info": 1, "medium": 2, "high": 3}
             hm = a.copy()
-            hm["score"] = hm["severity"].map(sev_score)
             hm["fy"] = hm["period_end"].map(_fy)
-            grid = hm.pivot_table(index="rule_id", columns="fy",
-                                  values="score", aggfunc="max")
+            grid = hm.pivot_table(index="severity", columns="fy",
+                                  values="rule_id", aggfunc="count")
             all_fy = sorted(r["fy"].unique())
-            grid = grid.reindex(columns=all_fy)
+            sev_order = [s for s in ("high", "medium", "info")
+                         if s in grid.index]
+            grid = grid.reindex(index=sev_order, columns=all_fy)
             fig = px.imshow(
-                grid,
-                color_continuous_scale=[[0, "#e8edf3"], [0.33, "#5b9bd5"],
-                                        [0.66, WARN], [1.0, BAD]],
-                zmin=0, zmax=3, aspect="auto",
-                labels=dict(color="severity"))
-            fig.update_layout(height=90 + 42 * len(grid),
+                grid, text_auto=True, aspect="auto",
+                color_continuous_scale=[[0, "#e8edf3"], [0.5, WARN],
+                                        [1.0, BAD]],
+                labels=dict(x="fiscal year", y="severity",
+                            color="flags"))
+            fig.update_layout(height=110 + 60 * len(grid),
                               coloraxis_showscale=False,
                               margin=dict(t=10, b=10))
+            fig.update_traces(
+                hovertemplate="FY %{x} · %{y}: %{z} flag(s)<extra></extra>")
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("🔵 info · 🟠 medium · 🔴 high — hover a cell for "
-                       "the rule and year")
+            st.caption("Count of red flags by severity and fiscal year — "
+                       "details below")
 
             badge = {"high": "🔴", "medium": "🟠", "info": "🔵"}
             for _, row in a.sort_values(
