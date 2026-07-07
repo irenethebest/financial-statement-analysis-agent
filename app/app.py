@@ -862,27 +862,38 @@ def price_history(ticker: str) -> tuple[pd.DataFrame, str]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def wiki_summary(name: str) -> dict:
+    """SEC entity names are ALL-CAPS ('APPLE INC', '.../DE'), and the
+    Wikipedia summary endpoint is title-case-sensitive — so resolve the
+    real page title via the search API first."""
+    import re as _re
     import urllib.parse
 
     import requests
-    for candidate in (name,
-                      name.replace(" Inc.", "").replace(" Inc", "")
-                          .replace(" Corp.", "").replace(", Inc.", "")
-                          .strip()):
-        try:
-            resp = requests.get(
-                "https://en.wikipedia.org/api/rest_v1/page/summary/"
-                + urllib.parse.quote(candidate),
-                headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
-                timeout=15)
-            if resp.status_code == 200:
-                j = resp.json()
-                if j.get("extract") and j.get("type") == "standard":
-                    return {"text": j["extract"],
-                            "url": j.get("content_urls", {})
-                                    .get("desktop", {}).get("page")}
-        except Exception:
-            pass
+    headers = {"User-Agent": f"FSA portfolio app {UA_EMAIL}"}
+    # Drop SEC state-of-incorporation suffixes: '/DE', '/OH/', ...
+    clean = _re.sub(r"/[A-Z]{2}/?$", "", str(name)).strip()
+    try:
+        s = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "query", "list": "search", "format": "json",
+                    "srlimit": 1, "srsearch": f"{clean} company"},
+            headers=headers, timeout=15).json()
+        hits = s.get("query", {}).get("search", [])
+        if not hits:
+            return {}
+        title = hits[0]["title"]
+        resp = requests.get(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/"
+            + urllib.parse.quote(title),
+            headers=headers, timeout=15)
+        if resp.status_code == 200:
+            j = resp.json()
+            if j.get("extract") and j.get("type") == "standard":
+                return {"text": j["extract"],
+                        "url": j.get("content_urls", {})
+                                .get("desktop", {}).get("page")}
+    except Exception:
+        pass
     return {}
 
 
@@ -1036,15 +1047,30 @@ with tab_overview:
                        "Finance both failed — possibly network egress "
                        "or rate limits).")
 
-    st.subheader("Peers in your catalog (same SIC sector)")
+    st.divider()
+    st.subheader("Peers in your catalog")
     if prof is not None and not profiles.empty:
-        peer_prof = profiles[
-            (profiles["sic"].str[:2] == str(prof["sic"])[:2])
-            & (profiles["ticker"] != sel_o)]
+        # Match at the most specific SIC level that yields peers:
+        # 3-digit industry -> 2-digit group -> 1-digit division.
+        sic = str(prof.get("sic") or "")
+        peer_prof = pd.DataFrame()
+        match_label = None
+        for depth, label in [(3, "same industry (3-digit SIC)"),
+                             (2, "same industry group (2-digit SIC)"),
+                             (1, "same sector division (1-digit SIC)")]:
+            if len(sic) < depth:
+                continue
+            cand = profiles[
+                (profiles["sic"].str[:depth] == sic[:depth])
+                & (profiles["ticker"] != sel_o)]
+            if not cand.empty:
+                peer_prof, match_label = cand, label
+                break
         if peer_prof.empty:
             st.caption("No ingested peers share this company's SIC sector "
                        "yet — ask the analyst to ingest a competitor.")
         else:
+            st.caption(f"Matched by {match_label}.")
             latest_r = (ratios_o.sort_values("period_end")
                         .groupby("ticker").tail(1)
                         .set_index("ticker"))
@@ -1073,9 +1099,13 @@ with tab_overview:
             st.dataframe(pd.DataFrame(rows), use_container_width=True,
                          hide_index=True)
 
-    with st.expander("Top institutional holders (yfinance, best-effort)"):
-        hold = yf_holders(sel_o)
-        if hold.empty:
-            st.caption("Holder data unavailable right now.")
-        else:
-            st.dataframe(hold, use_container_width=True, hide_index=True)
+    st.divider()
+    st.subheader("Ownership")
+    st.caption("Largest institutional shareholders of "
+               f"{sel_o} — unrelated to the peer comparison above. "
+               "Source: Yahoo Finance (best-effort).")
+    hold = yf_holders(sel_o)
+    if hold.empty:
+        st.caption("Holder data unavailable right now.")
+    else:
+        st.dataframe(hold, use_container_width=True, hide_index=True)
