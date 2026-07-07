@@ -965,15 +965,18 @@ with tab_overview:
 
     st.title(name)
     if prof is not None:
-        hq = ", ".join(x for x in [prof.get("hq_city"),
-                                   prof.get("hq_state")] if x)
-        bits = [f"**Sector:** {prof.get('sic_description') or '—'} "
-                f"(SIC {prof.get('sic')})",
+        def _p(key):
+            v = prof.get(key)
+            return None if v is None or pd.isna(v) or v == "" else v
+
+        hq = ", ".join(x for x in [_p("hq_city"), _p("hq_state")] if x)
+        bits = [f"**Sector:** {_p('sic_description') or '—'} "
+                f"(SIC {_p('sic') or '—'})",
                 f"**HQ:** {hq or '—'}",
-                f"**Exchange:** {prof.get('exchange') or '—'}",
-                f"**Fiscal year end:** {prof.get('fiscal_year_end') or '—'}"]
-        if prof.get("website"):
-            bits.append(f"[{prof['website']}]({prof['website']})")
+                f"**Exchange:** {_p('exchange') or '—'}",
+                f"**Fiscal year end:** {_p('fiscal_year_end') or '—'}"]
+        if _p("website"):
+            bits.append(f"[{_p('website')}]({_p('website')})")
         st.markdown(" · ".join(bits))
     else:
         st.caption("Profile not ingested yet — re-run the pipeline to "
