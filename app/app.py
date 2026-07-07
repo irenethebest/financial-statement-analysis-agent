@@ -816,9 +816,18 @@ with tab_data:
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_profiles() -> pd.DataFrame:
     try:
-        return query(f"SELECT * FROM {CATALOG}.bronze.company_profile")
+        df = query(f"SELECT * FROM {CATALOG}.bronze.company_profile")
     except Exception:
         return pd.DataFrame()
+    # query() auto-numerifies columns; codes must stay strings (SIC "6199",
+    # zip, fiscal year end "0928" with its leading zero).
+    for c in df.columns:
+        if c != "cik":
+            df[c] = (df[c].astype("string")
+                     .str.replace(r"\.0$", "", regex=True))
+    if "fiscal_year_end" in df.columns:
+        df["fiscal_year_end"] = df["fiscal_year_end"].str.zfill(4)
+    return df
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
