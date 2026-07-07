@@ -229,7 +229,8 @@ st.caption(
     "the LLM only narrates."
 )
 
-tab_agent, tab_data = st.tabs(["🤖 Ask the analyst", "📊 Ratios & red flags"])
+tab_agent, tab_data, tab_overview = st.tabs(
+    ["🤖 Ask the analyst", "📊 Ratios & red flags", "🏢 Company overview"])
 
 # ---- Agent chat ----
 with tab_agent:
@@ -789,3 +790,241 @@ with tab_data:
         st.dataframe(r.drop(columns=["fy"]), use_container_width=True)
         st.subheader("Statement line items (wide)")
         st.dataframe(w.drop(columns=["fy"]), use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Company overview — profile (SEC), price (Stooq), intro (Wikipedia),
+# news (Google News RSS), holders (yfinance best-effort), peers (own catalog)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_profiles() -> pd.DataFrame:
+    try:
+        return query(f"SELECT * FROM {CATALOG}.bronze.company_profile")
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def stooq_prices(ticker: str) -> pd.DataFrame:
+    import io
+
+    import requests
+    resp = requests.get(f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d",
+                        timeout=20)
+    df = pd.read_csv(io.StringIO(resp.text))
+    if "Close" not in df.columns or df.empty:
+        return pd.DataFrame()
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df.tail(5 * 252)  # ~5 trading years
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def wiki_summary(name: str) -> dict:
+    import urllib.parse
+
+    import requests
+    for candidate in (name,
+                      name.replace(" Inc.", "").replace(" Inc", "")
+                          .replace(" Corp.", "").replace(", Inc.", "")
+                          .strip()):
+        try:
+            resp = requests.get(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/"
+                + urllib.parse.quote(candidate),
+                headers={"User-Agent": f"FSA portfolio app {UA_EMAIL}"},
+                timeout=15)
+            if resp.status_code == 200:
+                j = resp.json()
+                if j.get("extract") and j.get("type") == "standard":
+                    return {"text": j["extract"],
+                            "url": j.get("content_urls", {})
+                                    .get("desktop", {}).get("page")}
+        except Exception:
+            pass
+    return {}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def news_headlines(name: str, n: int = 3) -> list[dict]:
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+
+    import requests
+    try:
+        q = urllib.parse.quote(f'"{name}" stock')
+        resp = requests.get(
+            f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en",
+            timeout=15)
+        root = ET.fromstring(resp.content)
+        out = []
+        for item in root.iter("item"):
+            out.append({
+                "title": item.findtext("title") or "",
+                "link": item.findtext("link") or "",
+                "date": (item.findtext("pubDate") or "")[:16],
+            })
+            if len(out) >= n:
+                break
+        return out
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def yf_holders(ticker: str) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+        df = yf.Ticker(ticker).institutional_holders
+        if df is not None and not df.empty:
+            return df.head(8)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def shares_outstanding(ticker: str) -> float | None:
+    try:
+        df = query(
+            f"SELECT val FROM {CATALOG}.bronze.xbrl_facts "
+            f"WHERE ticker = '{ticker}' AND taxonomy = 'dei' "
+            "AND tag = 'EntityCommonStockSharesOutstanding' "
+            "ORDER BY `end` DESC LIMIT 1")
+        return float(df.iloc[0, 0]) if not df.empty else None
+    except Exception:
+        return None
+
+
+with tab_overview:
+    profiles = load_profiles()
+    try:
+        companies_o, ratios_o, _, wides_o, _, _ = load_overview()
+    except Exception as exc:
+        st.error(f"Could not load tables: {exc}")
+        st.stop()
+
+    tickers_o = sorted(companies_o["ticker"].tolist())
+    focus_o = st.session_state.get("focus_ticker")
+    idx_o = tickers_o.index(focus_o) if focus_o in tickers_o else 0
+    sel_o = st.selectbox("Company", tickers_o, index=idx_o,
+                         key="overview_ticker")
+
+    prof = (profiles[profiles["ticker"] == sel_o].iloc[0]
+            if not profiles.empty
+            and (profiles["ticker"] == sel_o).any() else None)
+    name = (prof["entity_name"] if prof is not None
+            else companies_o.set_index("ticker")
+            .loc[sel_o, "entity_name"])
+
+    st.title(name)
+    if prof is not None:
+        hq = ", ".join(x for x in [prof.get("hq_city"),
+                                   prof.get("hq_state")] if x)
+        bits = [f"**Sector:** {prof.get('sic_description') or '—'} "
+                f"(SIC {prof.get('sic')})",
+                f"**HQ:** {hq or '—'}",
+                f"**Exchange:** {prof.get('exchange') or '—'}",
+                f"**Fiscal year end:** {prof.get('fiscal_year_end') or '—'}"]
+        if prof.get("website"):
+            bits.append(f"[{prof['website']}]({prof['website']})")
+        st.markdown(" · ".join(bits))
+    else:
+        st.caption("Profile not ingested yet — re-run the pipeline to "
+                   "populate bronze.company_profile.")
+
+    colL, colR = st.columns([2, 3])
+
+    with colL:
+        st.subheader("About")
+        wiki = wiki_summary(name)
+        if wiki:
+            st.write(wiki["text"])
+            if wiki.get("url"):
+                st.caption(f"[Wikipedia]({wiki['url']})")
+        else:
+            st.caption("No introduction found.")
+
+        st.subheader("Recent headlines")
+        for h in news_headlines(name):
+            st.markdown(f"- [{h['title']}]({h['link']})  \n"
+                        f"  <sub>{h['date']}</sub>",
+                        unsafe_allow_html=True)
+        if not news_headlines(name):
+            st.caption("No headlines found.")
+
+    with colR:
+        px_df = stooq_prices(sel_o)
+        if not px_df.empty:
+            last_close = px_df["Close"].iloc[-1]
+            yr = px_df[px_df["Date"] >= px_df["Date"].max()
+                       - pd.Timedelta(days=365)]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Last close", f"${last_close:,.2f}",
+                      f"{last_close / px_df['Close'].iloc[-2] - 1:+.2%}"
+                      if len(px_df) > 1 else None)
+            m2.metric("52w high", f"${yr['Close'].max():,.2f}")
+            m3.metric("52w low", f"${yr['Close'].min():,.2f}")
+            sh = shares_outstanding(sel_o)
+            m4.metric("Market cap", _b(last_close * sh) if sh else "—",
+                      help="Last close × latest reported shares "
+                           "outstanding (SEC dei)")
+
+            figp = px.area(px_df, x="Date", y="Close",
+                           color_discrete_sequence=[ACCENT])
+            figp.update_layout(
+                height=330, margin=dict(t=10, b=10),
+                xaxis=dict(rangeselector=dict(buttons=[
+                    dict(count=3, label="3m", step="month",
+                         stepmode="backward"),
+                    dict(count=1, label="1y", step="year",
+                         stepmode="backward"),
+                    dict(label="5y", step="all")])))
+            st.plotly_chart(figp, use_container_width=True)
+            st.caption("Daily close, Stooq (EOD).")
+        else:
+            st.caption("Price history unavailable from Stooq for this "
+                       "ticker.")
+
+    st.subheader("Peers in your catalog (same SIC sector)")
+    if prof is not None and not profiles.empty:
+        peer_prof = profiles[
+            (profiles["sic"].str[:2] == str(prof["sic"])[:2])
+            & (profiles["ticker"] != sel_o)]
+        if peer_prof.empty:
+            st.caption("No ingested peers share this company's SIC sector "
+                       "yet — ask the analyst to ingest a competitor.")
+        else:
+            latest_r = (ratios_o.sort_values("period_end")
+                        .groupby("ticker").tail(1)
+                        .set_index("ticker"))
+            latest_w = (wides_o.sort_values("period_end")
+                        .groupby("ticker").tail(1)
+                        .set_index("ticker"))
+            rows = []
+            for _, p in pd.concat(
+                    [profiles[profiles["ticker"] == sel_o],
+                     peer_prof]).iterrows():
+                t = p["ticker"]
+                rr = latest_r.loc[t] if t in latest_r.index else {}
+                ww = latest_w.loc[t] if t in latest_w.index else {}
+                rows.append({
+                    "Ticker": t + (" ⭐" if t == sel_o else ""),
+                    "Company": p["entity_name"],
+                    "Revenue": _b(ww.get("revenue")),
+                    "Net margin": (f"{rr.get('net_margin'):.1%}"
+                                   if pd.notna(rr.get("net_margin"))
+                                   else "—"),
+                    "ROE": (f"{rr.get('roe'):.1%}"
+                            if pd.notna(rr.get("roe")) else "—"),
+                    "D/E": (f"{rr.get('debt_to_equity'):.2f}"
+                            if pd.notna(rr.get("debt_to_equity")) else "—"),
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                         hide_index=True)
+
+    with st.expander("Top institutional holders (yfinance, best-effort)"):
+        hold = yf_holders(sel_o)
+        if hold.empty:
+            st.caption("Holder data unavailable right now.")
+        else:
+            st.dataframe(hold, use_container_width=True, hide_index=True)

@@ -94,7 +94,7 @@ if INCLUDE_EXISTING:
         print("No existing companies table — first run")
 
 fetched_at = datetime.now(timezone.utc).isoformat()
-companies, fact_rows, filing_rows = [], [], []
+companies, fact_rows, filing_rows, profile_rows = [], [], [], []
 
 failed = []
 for ticker in TICKERS:
@@ -129,6 +129,26 @@ for ticker in TICKERS:
         "entity_name": bundle["entity_name"],
         "n_fact_rows": len(facts),
         "fetched_at": fetched_at,
+    })
+
+    # Company profile from the submissions JSON (sector, HQ, ...).
+    sub = bundle["submissions"]
+    addr = (sub.get("addresses") or {}).get("business") or {}
+    profile_rows.append({
+        "ticker": ticker,
+        "cik": bundle["cik"],
+        "entity_name": bundle["entity_name"],
+        "sic": str(sub.get("sic") or ""),
+        "sic_description": sub.get("sicDescription"),
+        "website": sub.get("website") or None,
+        "state_of_incorporation": sub.get("stateOfIncorporation"),
+        "fiscal_year_end": sub.get("fiscalYearEnd"),
+        "hq_street": addr.get("street1"),
+        "hq_city": addr.get("city"),
+        "hq_state": addr.get("stateOrCountry"),
+        "hq_zip": addr.get("zipCode"),
+        "phone": sub.get("phone"),
+        "exchange": (sub.get("exchanges") or [None])[0],
     })
     print(f"  {bundle['entity_name']} (CIK {bundle['cik']}): "
           f"{len(facts):,} fact rows")
@@ -202,6 +222,10 @@ spark.createDataFrame(facts_pdf) \
 spark.createDataFrame(pd.DataFrame(filing_rows)) \
     .write.mode("overwrite").option("overwriteSchema", "true") \
     .saveAsTable("filings")
+
+spark.createDataFrame(pd.DataFrame(profile_rows)) \
+    .write.mode("overwrite").option("overwriteSchema", "true") \
+    .saveAsTable("company_profile")
 
 if mdna_rows:
     spark.createDataFrame(pd.DataFrame(mdna_rows)) \
