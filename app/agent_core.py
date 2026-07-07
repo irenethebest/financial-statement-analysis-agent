@@ -24,7 +24,7 @@ from typing import Callable
 # course rather than return a hallucinated transcript to the user.
 _FAKE_TOOL_CALL = re.compile(
     r"(?:get_statements|get_ratios|get_anomalies|list_companies"
-    r"|ingest_company|get_pipeline_status)\s*\("
+    r"|ingest_company|get_pipeline_status|search_mdna)\s*\("
     r"|/ipython|<\|python_tag\|>|<\|eom\|>")
 
 
@@ -94,7 +94,9 @@ When asked to analyze a company, follow this shape:
 4. DuPont ROE story: is return on equity driven by margins, by asset
    efficiency, or by leverage? Explain what that mix means.
 5. Red flags from get_anomalies, each explained in one plain sentence,
-   ordered by severity. Include the 'so what'.
+   ordered by severity. Include the 'so what'. When a flag fires, use
+   search_mdna to check whether management addresses it in the MD&A and
+   note whether their explanation is convincing — quote briefly if useful.
 6. Close with 2-3 things a curious reader should watch next year.
 
 Define every technical term in parentheses the first time you use it.
@@ -160,6 +162,22 @@ TOOL_SPECS = [
     {
         "type": "function",
         "function": {
+            "name": "search_mdna",
+            "description": "Keyword search over the MD&A (Management's Discussion & Analysis) narrative of the company's recent 10-K filings. Returns best-matching passages with filing dates. Use it to find management's own explanation of trends, liquidity, and risks — especially to cross-check red flags from get_anomalies against what management says.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "p_ticker": {"type": "string", "description": "Stock ticker, e.g. AAPL"},
+                    "p_query": {"type": "string",
+                                "description": "Space-separated keywords, e.g. 'receivables collection customers'"},
+                },
+                "required": ["p_ticker", "p_query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ingest_company",
             "description": "Start the governed ingestion pipeline (SEC EDGAR -> bronze -> silver -> gold) for a US-listed SEC filer that is NOT yet in list_companies. Takes a few minutes; existing companies are preserved. Call at most once per company, then tell the user to ask again shortly.",
             "parameters": {
@@ -191,6 +209,7 @@ _PARAM_ORDER = {
     "get_statements": ["p_ticker", "p_statement"],
     "get_ratios": ["p_ticker"],
     "get_anomalies": ["p_ticker"],
+    "search_mdna": ["p_ticker", "p_query"],
 }
 
 

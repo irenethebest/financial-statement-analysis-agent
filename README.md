@@ -43,6 +43,10 @@ Workflow: build on a feature branch (or locally) → push to `dev` (CI tests + a
 
 On Free Edition (and as cost discipline anywhere), an always-on Model Serving endpoint is the resource to avoid. The tool-calling loop is plain Python speaking the OpenAI protocol, so the Streamlit app executes it in-process: UC tool functions run on the bound SQL warehouse, the LLM is the shared pay-per-token endpoint. `src/05_agent.py` documents the production path (`mlflow.pyfunc.log_model` + `agents.deploy`) for a paid workspace — same loop, different serving skin.
 
+## MD&A: numbers vs. narrative
+
+The pipeline also extracts the **Management's Discussion & Analysis** section from each recent 10-K (heuristic boundary detection on the filing HTML — there is no structured marker; only the extracted text is persisted, in `bronze.mdna`, chunked into `silver.mdna_chunks`). The agent gets a `search_mdna(ticker, keywords)` tool — keyword search executed on the SQL warehouse, nothing fetched live at question time. The payoff: when the anomaly detector flags something (say, receivables outrunning revenue), the agent can check whether management even addresses it in their own narrative, and say whether the explanation holds up.
+
 The agent is also **model-agnostic by design**: Free Edition workspaces sit in a trust tier that rate-limits premium hosted models (Claude, GPT) to zero, so the default endpoint is `databricks-llama-4-maverick`; on a paid workspace, setting the `llm_endpoint` bundle variable to `databricks-claude-sonnet-5` swaps the model with no code change.
 
 ## On-demand ingestion (the agent can act)
@@ -79,6 +83,7 @@ Two GitHub Actions workflows (same pattern as my [accounting_analytics](../accou
 |---|---|
 | `fsa/edgar.py` | SEC EDGAR client (rate-limited, retry, fair-access headers) |
 | `fsa/statements.py` | XBRL tag→line-item mapping with ordered fallbacks |
+| `fsa/mdna.py` | MD&A extraction from filing HTML (heuristic boundaries) + chunking |
 | `fsa/ratios.py` | Ratio + DuPont computation (pure pandas, unit-tested) |
 | `fsa/anomalies.py` | Deterministic red-flag rules |
 | `fsa/agent_core.py` | The tool-calling loop (shared; copied into `app/`) |

@@ -9,6 +9,8 @@
 # MAGIC **Tables created** in `{catalog}.silver`:
 # MAGIC * `statements`      — tidy: one row per (ticker, line_item, period)
 # MAGIC * `statements_wide` — one row per (ticker, period), column per item
+# MAGIC * `mdna_chunks`     — MD&A split into ~1.4k-char paragraph chunks
+# MAGIC   for the agent's keyword search tool
 
 # COMMAND ----------
 
@@ -32,7 +34,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.getcwd(), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from fsa import statements  # noqa: E402
+from fsa import mdna, statements  # noqa: E402
 
 # COMMAND ----------
 
@@ -64,3 +66,40 @@ spark.createDataFrame(wide) \
 
 print(f"Wrote {CATALOG}.silver.statements ({len(tidy):,}) and "
       f"statements_wide ({len(wide):,})")
+
+# COMMAND ----------
+
+# MAGIC %md ### MD&A → searchable paragraph chunks
+
+# COMMAND ----------
+
+chunk_rows = []
+try:
+    mdna_pdf = spark.table(f"{CATALOG}.bronze.mdna").toPandas()
+except Exception:
+    mdna_pdf = None
+
+if mdna_pdf is not None and not mdna_pdf.empty:
+    for _, row in mdna_pdf[mdna_pdf["extraction_ok"] == True].iterrows():  # noqa: E712
+        for i, chunk in enumerate(mdna.chunk_text(row["mdna_text"])):
+            chunk_rows.append({
+                "ticker": row["ticker"],
+                "form": row["form"],
+                "filing_date": row["filing_date"],
+                "accession_number": row["accession_number"],
+                "chunk_id": i,
+                "chunk_text": chunk,
+            })
+
+if chunk_rows:
+    import pandas as pd
+    spark.createDataFrame(pd.DataFrame(chunk_rows)) \
+        .write.mode("overwrite").option("overwriteSchema", "true") \
+        .saveAsTable("mdna_chunks")
+else:  # stable empty schema
+    spark.sql("""
+        CREATE TABLE IF NOT EXISTS mdna_chunks (
+            ticker STRING, form STRING, filing_date STRING,
+            accession_number STRING, chunk_id INT, chunk_text STRING)
+    """)
+print(f"Wrote {CATALOG}.silver.mdna_chunks ({len(chunk_rows):,} chunks)")

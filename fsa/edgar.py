@@ -71,6 +71,37 @@ def fetch_submissions(cik: int, user_agent_email: str) -> dict[str, Any]:
     return _get(SUBMISSIONS_URL.format(cik=cik), user_agent_email)
 
 
+FILING_DOC_URL = ("https://www.sec.gov/Archives/edgar/data/"
+                  "{cik}/{accession}/{doc}")
+
+
+def fetch_filing_document(cik: int, accession_number: str,
+                          primary_document: str,
+                          user_agent_email: str) -> str:
+    """Raw HTML of a filing's primary document (e.g. the 10-K itself).
+
+    Used for narrative sections like MD&A that are not in XBRL.
+    """
+    global _last_request_ts
+    url = FILING_DOC_URL.format(cik=cik,
+                                accession=accession_number.replace("-", ""),
+                                doc=primary_document)
+    for attempt in range(3):
+        wait = _MIN_INTERVAL_S - (time.time() - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.time()
+        resp = requests.get(url, headers=_headers(user_agent_email),
+                            timeout=60)
+        if resp.status_code == 200:
+            return resp.text
+        if resp.status_code in (403, 429, 503) and attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
+        resp.raise_for_status()
+    raise RuntimeError(f"Failed to fetch {url}")
+
+
 def fetch_all(ticker: str, user_agent_email: str) -> dict[str, Any]:
     """Convenience bundle for one company: identity + facts + submissions."""
     cik, title = ticker_to_cik(ticker, user_agent_email)

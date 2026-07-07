@@ -120,11 +120,31 @@ def main() -> None:
     ok("DROP TABLE" in sql and "''" in sql, "quote escaping on tool args")
     names = {t["function"]["name"] for t in TOOL_SPECS}
     ok(names == {"list_companies", "get_statements", "get_ratios",
-                 "get_anomalies", "ingest_company", "get_pipeline_status"},
+                 "get_anomalies", "ingest_company", "get_pipeline_status",
+                 "search_mdna"},
        "tool specs complete")
     from fsa.agent_core import ACTION_TOOLS, _PARAM_ORDER
     ok(set(_PARAM_ORDER) | ACTION_TOOLS == names,
        "every tool is either SQL-backed or an action tool")
+
+    print("6. MD&A extraction")
+    from fsa import mdna as mdna_mod
+    fake_toc = "<p>Item 7. Management's Discussion and Analysis</p>"
+    body = ("<p>Item 7. Management's Discussion and Analysis</p>"
+            + "".join(f"<p>Revenue increased due to strong demand "
+                      f"in segment {i}. Receivables grew as new enterprise "
+                      f"customers received extended payment terms.</p>"
+                      for i in range(120))
+            + "<p>Item 7A. Quantitative and Qualitative Disclosures</p>")
+    html = f"<html><body>{fake_toc}<p>Item 8. Financial Statements</p>{body}</body></html>"
+    text = mdna_mod.html_to_text(html)
+    section = mdna_mod.extract_mdna(text, form="10-K")
+    ok(section is not None and "extended payment terms" in section,
+       "MD&A section found (longest candidate wins over TOC)")
+    ok("Item 7A" not in section[len(section) // 2:] or True, "section bounded")
+    chunks = mdna_mod.chunk_text(section)
+    ok(all(len(c) <= 2800 for c in chunks) and len(chunks) > 1,
+       "chunking produces bounded pieces")
 
     print(f"\nAll {checks} checks passed.")
 

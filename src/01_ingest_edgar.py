@@ -2,14 +2,18 @@
 # MAGIC %md
 # MAGIC # 01 · Ingest — SEC EDGAR → Bronze
 # MAGIC
-# MAGIC Pulls XBRL **company facts** and filing metadata for a list of tickers
-# MAGIC from SEC EDGAR's free JSON APIs (no scraping, no API key) and lands them
-# MAGIC as managed Delta tables in Unity Catalog.
+# MAGIC Pulls XBRL **company facts**, filing metadata, and the **MD&A
+# MAGIC narrative** for a list of tickers from SEC EDGAR (free JSON APIs +
+# MAGIC the filing documents themselves) and lands managed Delta tables in
+# MAGIC Unity Catalog.
 # MAGIC
 # MAGIC **Tables created** in `{catalog}.bronze`:
 # MAGIC * `companies`   — one row per company (identity + fetch metadata)
 # MAGIC * `xbrl_facts`  — one row per XBRL observation (fully exploded)
 # MAGIC * `filings`     — recent filing index (form, accession, dates)
+# MAGIC * `mdna`        — extracted Management's Discussion & Analysis text
+# MAGIC   per recent 10-K (the raw ~15 MB filing HTML is not persisted —
+# MAGIC   only the extracted section)
 
 # COMMAND ----------
 
@@ -21,10 +25,13 @@ dbutils.widgets.text("owner_user", "jchoi867@gatech.edu",
                      "User to grant catalog access (CI runs as a service principal)")
 dbutils.widgets.text("include_existing", "true",
                      "Also re-ingest tickers already in bronze (merge semantics)")
+dbutils.widgets.text("mdna_filings", "2",
+                     "How many recent 10-Ks to extract MD&A from, per company")
 
 CATALOG = dbutils.widgets.get("catalog")
 OWNER_USER = dbutils.widgets.get("owner_user")
 INCLUDE_EXISTING = dbutils.widgets.get("include_existing").lower() == "true"
+MDNA_FILINGS = int(dbutils.widgets.get("mdna_filings"))
 SCHEMA = "bronze"
 TICKERS = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",") if t.strip()]
 UA_EMAIL = dbutils.widgets.get("user_agent_email")
@@ -40,7 +47,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.getcwd(), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from fsa import edgar  # noqa: E402
+from fsa import edgar, mdna  # noqa: E402
 
 # COMMAND ----------
 
@@ -128,6 +135,44 @@ for ticker in TICKERS:
 
 # COMMAND ----------
 
+# MAGIC %md ### Extract MD&A from the most recent 10-Ks
+
+# COMMAND ----------
+
+mdna_rows = []
+by_ticker: dict = {}
+for f in filing_rows:
+    if f["form"] == "10-K":
+        by_ticker.setdefault(f["ticker"], []).append(f)
+
+for ticker, fils in by_ticker.items():
+    fils = sorted(fils, key=lambda f: f["filing_date"], reverse=True)
+    for f in fils[:MDNA_FILINGS]:
+        try:
+            html = edgar.fetch_filing_document(
+                f["cik"], f["accession_number"], f["primary_document"],
+                UA_EMAIL)
+            text = mdna.extract_mdna(mdna.html_to_text(html), form="10-K")
+        except Exception as exc:
+            print(f"  MD&A fetch failed for {ticker} "
+                  f"{f['accession_number']}: {exc}")
+            text = None
+        mdna_rows.append({
+            "ticker": ticker,
+            "cik": f["cik"],
+            "form": f["form"],
+            "accession_number": f["accession_number"],
+            "filing_date": f["filing_date"],
+            "mdna_text": text,
+            "char_count": len(text) if text else 0,
+            "extraction_ok": text is not None,
+        })
+        print(f"  MD&A {ticker} {f['filing_date']}: "
+              f"{len(text):,} chars" if text else
+              f"  MD&A {ticker} {f['filing_date']}: NOT FOUND")
+
+# COMMAND ----------
+
 # MAGIC %md ### Write bronze Delta tables (idempotent overwrite — tiny data)
 
 # COMMAND ----------
@@ -148,8 +193,20 @@ spark.createDataFrame(pd.DataFrame(filing_rows)) \
     .write.mode("overwrite").option("overwriteSchema", "true") \
     .saveAsTable("filings")
 
+if mdna_rows:
+    spark.createDataFrame(pd.DataFrame(mdna_rows)) \
+        .write.mode("overwrite").option("overwriteSchema", "true") \
+        .saveAsTable("mdna")
+else:  # stable empty schema so downstream never breaks
+    spark.sql("""
+        CREATE TABLE IF NOT EXISTS mdna (
+            ticker STRING, cik BIGINT, form STRING,
+            accession_number STRING, filing_date STRING,
+            mdna_text STRING, char_count BIGINT, extraction_ok BOOLEAN)
+    """)
+
 print("Bronze tables written:")
-for t in ("companies", "xbrl_facts", "filings"):
+for t in ("companies", "xbrl_facts", "filings", "mdna"):
     print(f"  {CATALOG}.{SCHEMA}.{t}: {spark.table(t).count():,} rows")
 if failed:
     print(f"Skipped tickers (not found / fetch error): {failed}")
