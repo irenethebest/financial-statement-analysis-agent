@@ -34,6 +34,7 @@ INCLUDE_EXISTING = dbutils.widgets.get("include_existing").lower() == "true"
 MDNA_FILINGS = int(dbutils.widgets.get("mdna_filings"))
 SCHEMA = "bronze"
 TICKERS = [t.strip().upper() for t in dbutils.widgets.get("tickers").split(",") if t.strip()]
+REQUESTED = set(TICKERS)  # explicitly asked for in THIS run
 UA_EMAIL = dbutils.widgets.get("user_agent_email")
 print(f"Target: {CATALOG}.{SCHEMA} | tickers: {TICKERS}")
 
@@ -262,3 +263,12 @@ for t in ("companies", "xbrl_facts", "filings", "mdna", "segment_revenue"):
     print(f"  {CATALOG}.{SCHEMA}.{t}: {spark.table(t).count():,} rows")
 if failed:
     print(f"Skipped tickers (not found / fetch error): {failed}")
+    # A pre-existing ticker failing a refresh is tolerable; the ticker this
+    # run was EXPLICITLY asked to ingest failing is not — fail loudly so
+    # the agent's get_pipeline_status reports it instead of silently
+    # re-triggering forever.
+    bad = sorted(set(failed) & REQUESTED)
+    if bad:
+        raise RuntimeError(
+            f"Requested ticker(s) failed to ingest: {bad} — see the "
+            "SKIPPED lines above for the underlying error.")
