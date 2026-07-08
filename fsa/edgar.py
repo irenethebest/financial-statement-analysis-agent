@@ -40,7 +40,10 @@ def _get(url: str, user_agent_email: str, retries: int = 3) -> dict[str, Any]:
         if wait > 0:
             time.sleep(wait)
         _last_request_ts = time.time()
-        resp = requests.get(url, headers=_headers(user_agent_email), timeout=30)
+        # Generous timeout: companyfacts JSON for large filers (e.g. MU)
+        # can be tens of MB — 30s cut them off and the ticker was skipped.
+        resp = requests.get(url, headers=_headers(user_agent_email),
+                            timeout=120)
         if resp.status_code == 200:
             return resp.json()
         if resp.status_code in (403, 429, 503) and attempt < retries - 1:
