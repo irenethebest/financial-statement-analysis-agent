@@ -15,5 +15,6 @@ env:
     valueFrom: llm
   - name: PIPELINE_JOB_ID
     valueFrom: pipeline
-  - name: APP_CATALOG
-    value: fs_analysis_agent_dev
+  # APP_CATALOG intentionally NOT set: the app derives its catalog from
+  # its own name (fsa-agent-dev -> fs_analysis_agent_dev, etc.), so one
+  # app.yaml serves every environment.

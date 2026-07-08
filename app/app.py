@@ -34,7 +34,20 @@ try:
 except ImportError:
     import agent_core  # noqa: E402
 
-CATALOG = os.getenv("APP_CATALOG", "fs_analysis_agent_dev")
+def _resolve_catalog() -> str:
+    """Environment catalog. Explicit APP_CATALOG wins; otherwise derive
+    from the app's own name (fsa-agent-dev/-test/-prod), so each
+    environment's app reads ITS OWN catalog without per-env app.yaml."""
+    explicit = os.getenv("APP_CATALOG")
+    if explicit:
+        return explicit
+    env = os.getenv("DATABRICKS_APP_NAME", "").rsplit("-", 1)[-1]
+    return {"dev": "fs_analysis_agent_dev",
+            "test": "fs_analysis_agent_test",
+            "prod": "fs_analysis_agent"}.get(env, "fs_analysis_agent_dev")
+
+
+CATALOG = _resolve_catalog()
 FQ = f"{CATALOG}.gold"  # tool functions live in the gold (serving) schema
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 LLM = os.getenv("LLM_ENDPOINT", "databricks-llama-4-maverick")
