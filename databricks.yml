@@ -113,6 +113,10 @@ resources:
               tickers: ${var.tickers}
               user_agent_email: ${var.user_agent_email}
               owner_user: ${var.owner_user}
+              # Scheduled runs refresh EVERY ingested company; the agent's
+              # ingest_company tool overrides this to "false" for fast
+              # single-ticker ingestion.
+              include_existing: "true"
 
         # 02 — bronze -> {catalog}.silver.{statements, statements_wide}
         - task_key: build_statements

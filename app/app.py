@@ -147,8 +147,11 @@ def _ingest_company(ticker: str) -> str:
                            "note": "The pipeline is already running; new "
                                    "tickers can be requested once it finishes."})
 
+    # include_existing=false -> fetch ONLY this ticker; bronze writes are
+    # per-ticker merges, so existing companies are untouched (fast).
     run = w.jobs.run_now(job_id=int(PIPELINE_JOB_ID),
-                         notebook_params={"tickers": ticker})
+                         notebook_params={"tickers": ticker,
+                                          "include_existing": "false"})
     return json.dumps({
         "status": "started",
         "ticker": ticker,

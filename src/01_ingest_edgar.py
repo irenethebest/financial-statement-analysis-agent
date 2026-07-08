@@ -208,21 +208,31 @@ for ticker, fils in by_ticker.items():
 
 # COMMAND ----------
 
-spark.createDataFrame(pd.DataFrame(companies)) \
-    .write.mode("overwrite").option("overwriteSchema", "true") \
-    .saveAsTable("companies")
+fetched = [c["ticker"] for c in companies]
+
+
+def write_merge(table: str, sdf):
+    """Per-ticker merge: replace only THIS run's tickers, keep the rest.
+    Existing companies are no longer re-fetched on incremental runs."""
+    if spark.catalog.tableExists(f"{CATALOG}.{SCHEMA}.{table}"):
+        tick_list = ",".join(f"'{t}'" for t in fetched)
+        spark.sql(f"DELETE FROM {table} WHERE ticker IN ({tick_list})")
+        sdf.write.mode("append").option("mergeSchema", "true") \
+            .saveAsTable(table)
+    else:
+        sdf.write.mode("overwrite").option("overwriteSchema", "true") \
+            .saveAsTable(table)
+
+
+write_merge("companies", spark.createDataFrame(pd.DataFrame(companies)))
 
 facts_pdf = pd.DataFrame(fact_rows)
 # Explicit types keep the Delta schema stable across runs.
 facts_pdf["val"] = pd.to_numeric(facts_pdf["val"], errors="coerce")
 facts_pdf["fy"] = pd.to_numeric(facts_pdf["fy"], errors="coerce").astype("Int64")
-spark.createDataFrame(facts_pdf) \
-    .write.mode("overwrite").option("overwriteSchema", "true") \
-    .saveAsTable("xbrl_facts")
+write_merge("xbrl_facts", spark.createDataFrame(facts_pdf))
 
-spark.createDataFrame(pd.DataFrame(filing_rows)) \
-    .write.mode("overwrite").option("overwriteSchema", "true") \
-    .saveAsTable("filings")
+write_merge("filings", spark.createDataFrame(pd.DataFrame(filing_rows)))
 
 # astype("string"): all-None columns (e.g. website) otherwise break
 # Spark's type inference and fail the write.
@@ -230,14 +240,10 @@ profile_pdf = pd.DataFrame(profile_rows)
 for c in profile_pdf.columns:
     if c != "cik":
         profile_pdf[c] = profile_pdf[c].astype("string")
-spark.createDataFrame(profile_pdf) \
-    .write.mode("overwrite").option("overwriteSchema", "true") \
-    .saveAsTable("company_profile")
+write_merge("company_profile", spark.createDataFrame(profile_pdf))
 
 if mdna_rows:
-    spark.createDataFrame(pd.DataFrame(mdna_rows)) \
-        .write.mode("overwrite").option("overwriteSchema", "true") \
-        .saveAsTable("mdna")
+    write_merge("mdna", spark.createDataFrame(pd.DataFrame(mdna_rows)))
 else:  # stable empty schema so downstream never breaks
     spark.sql("""
         CREATE TABLE IF NOT EXISTS mdna (
@@ -247,9 +253,8 @@ else:  # stable empty schema so downstream never breaks
     """)
 
 if segment_rows:
-    spark.createDataFrame(pd.DataFrame(segment_rows)) \
-        .write.mode("overwrite").option("overwriteSchema", "true") \
-        .saveAsTable("segment_revenue")
+    write_merge("segment_revenue",
+                spark.createDataFrame(pd.DataFrame(segment_rows)))
 else:
     spark.sql("""
         CREATE TABLE IF NOT EXISTS segment_revenue (
